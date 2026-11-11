@@ -68,8 +68,8 @@ registers its tools and joins nothing until you set a secret.
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `p2p_status` | `{}` | `{enabled, publicKey, fingerprint, topicPeers, trustedPeers, unread, listening}` |
-| `p2p_peers` | `{}` | `[{publicKey, fingerprint, label, status, lastSeen}]` |
+| `p2p_status` | `{}` | `{enabled, fingerprint, topicPeers, trustedPeers, unread, listening}` |
+| `p2p_peers` | `{}` | `[{fingerprint, label, status, lastSeen}]` |
 | `p2p_send` | `{to: fingerprint, text}` | `{messageId, queued, sent, peerStatus}` |
 | `p2p_inbox` | `{limit?, markRead?}` | `[{id, from, fromLabel, ts, text, read}]` |
 
@@ -86,8 +86,10 @@ context cost of an arriving message is a line, not a body. The full text is one 
   delivered. Treat it as a rendezvous point, not as an authorization.
 - **No broadcast in v1.** `to: "*"` is refused with "broadcast is v2".
 - **No file transfer in v1.** Text only.
-- **Keys are never printed.** `p2p_status` shows a fingerprint; the private key never leaves
-  `~/.dsh/p2p/identity.json` (mode 600, enforced on every load).
+- **No tool returns a key.** Tool results land in the model's context and the transcript, so
+  `p2p_status` and `p2p_peers` show fingerprints only, and peers are addressed by fingerprint. The key
+  travels on the wire in the hello envelope, where the other node needs it; the private half never
+  leaves `~/.dsh/p2p/identity.json` (mode 600, enforced on every load).
 - **Every message is logged locally** in `inbox.jsonl` for audit: path, time, peer and size.
 
 ## Run the tests
@@ -111,6 +113,9 @@ What the suites cover:
 - `test/e2e.test.js` — two real swarms in one process: A sends, B receives and acks, A's outbox
   drains, the wake notice carries only a preview; then the negative control, where an untrusted
   peer's message arrives and is dropped with an empty inbox.
+- `test/restart.test.js` — the replay window across a process boundary: an id accepted by one process
+  is refused by the next, with a negative control that turns persistence off and shows the id being
+  accepted again.
 
 Two fleets in two **separate processes**, each with its own `DSH_HOME` and state folder, are covered by
 a script rather than a test, because it spawns children:

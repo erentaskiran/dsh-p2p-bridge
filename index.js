@@ -43,6 +43,16 @@ const DEFAULTS = {
   dir: undefined,
 }
 
+/**
+ * The model-facing shape of a peer row: everything except the key.
+ *
+ * The table on disk keeps `publicKey` because the transport needs it to address a socket; the tool
+ * payload does not, because that is what lands in the transcript. Address peers by fingerprint.
+ */
+function publicPeer(peer) {
+  return { fingerprint: peer.fingerprint, label: peer.label, status: peer.status, lastSeen: peer.lastSeen }
+}
+
 function errorText(error) {
   return error instanceof Error ? error.message : String(error)
 }
@@ -246,9 +256,11 @@ export function apply(ctx, rawConfig) {
   }
 
   function status() {
+    // No public key here on purpose: this object reaches the model and the chat transcript, and the
+    // fingerprint is all a person or an agent needs — `p2p_send` addresses peers by fingerprint. The
+    // key still travels on the wire in the hello envelope, where the other node needs it.
     return {
       enabled,
-      publicKey: identity?.publicKey ?? null,
       fingerprint: identity?.fingerprint ?? null,
       topicPeers: transport.peerCount,
       trustedPeers: store.peers.list().filter((peer) => peer.status === 'trusted').length,
@@ -269,7 +281,6 @@ export function apply(ctx, rawConfig) {
         type: 'object',
         properties: {
           enabled: { type: 'boolean' },
-          publicKey: { type: ['string', 'null'] },
           fingerprint: { type: ['string', 'null'] },
           topicPeers: { type: 'number' },
           trustedPeers: { type: 'number' },
@@ -309,13 +320,12 @@ export function apply(ctx, rawConfig) {
             items: {
               type: 'object',
               properties: {
-                publicKey: { type: 'string' },
                 fingerprint: { type: 'string' },
                 label: { type: 'string' },
                 status: { type: 'string', enum: ['pending', 'trusted'] },
                 lastSeen: { type: 'string' },
               },
-              required: ['publicKey', 'fingerprint', 'label', 'status', 'lastSeen'],
+              required: ['fingerprint', 'label', 'status', 'lastSeen'],
             },
           },
         },
@@ -328,7 +338,7 @@ export function apply(ctx, rawConfig) {
       },
     },
     async execute() {
-      return { peers: store.peers.list() }
+      return { peers: store.peers.list().map(publicPeer) }
     },
   }
 

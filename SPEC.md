@@ -82,7 +82,8 @@ Rules:
 - `msg` only delivered when `to` matches this node's public key (or `*` for broadcast, v2).
 - `ack` returns the message id; unacked messages retry 3× with backoff, then land in `outbox.jsonl`
   as `undelivered` rather than being lost silently.
-- Replay defence: ids seen in the last 24 h are rejected.
+- Replay defence: ids seen in the last 24 h are rejected. The window is persisted to `seen.json`
+  on every accepted envelope, so a harness restart does not reopen it.
 
 ## Tools (what the agent sees)
 
@@ -90,10 +91,14 @@ Four tools, registered at Host level like `monitor`:
 
 | Tool | Args | Returns |
 |---|---|---|
-| `p2p_status` | `{}` | `{enabled, publicKey, fingerprint, topicPeers, trustedPeers, unread, listening}` |
-| `p2p_peers` | `{}` | `[{publicKey, fingerprint, label, status, lastSeen}]` |
+| `p2p_status` | `{}` | `{enabled, fingerprint, topicPeers, trustedPeers, unread, listening}` |
+| `p2p_peers` | `{}` | `[{fingerprint, label, status, lastSeen}]` |
 | `p2p_send` | `{to: fingerprint or "*", text}` | `{messageId, queued\|sent, peerStatus}` |
 | `p2p_inbox` | `{limit?, markRead?}` | `[{id, from, fromLabel, ts, text, read}]` |
+
+No tool returns a key. A tool result lands in the model's context and the chat transcript, so the
+keypair stays in `identity.json` and the peer table; the wire carries keys in the hello envelope,
+where the other node needs them, and nowhere else. Address peers by fingerprint.
 
 No tool can send to a peer with `status: "pending"` — `p2p_send` fails with
 `"peer not trusted: run p2p_trust <fingerprint>"`.
