@@ -95,6 +95,7 @@ export function apply(ctx, rawConfig) {
     onEnvelope: (envelope) => handle(envelope),
     onPeer: (publicKey) => flushOutbox(publicKey),
     onReplay: (envelope) => reacknowledge(envelope),
+    onPing: () => (identity === undefined ? undefined : seal(identity, { kind: 'ping', to: '*', body: {}, sign })),
     onConnect: (peer) => sendHello(peer),
     onRejected: (error) => log('rejected envelope', error),
     onLog: (what, detail) => log(`transport ${what}`, detail),
@@ -134,7 +135,15 @@ export function apply(ctx, rawConfig) {
       acknowledge(envelope)
       return
     }
-    if (envelope.kind === 'hello' || envelope.kind === 'ping' || envelope.kind === 'peers') return
+    if (envelope.kind === 'ping') {
+      // Answer through the same socket the ping arrived on, addressed to its sender.
+      if (envelope.to === '*' || envelope.to === identity?.publicKey) {
+        const pong = seal(identity, { kind: 'hello', to: envelope.from, body: { label: identity.label, pong: true }, sign })
+        transport.sendTo(envelope.from, pong)
+      }
+      return
+    }
+    if (envelope.kind === 'hello' || envelope.kind === 'peers') return
     if (envelope.kind !== 'msg') return
     if (envelope.to === '*') {
       stats.dropped += 1
