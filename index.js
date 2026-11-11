@@ -296,7 +296,10 @@ export function apply(ctx, rawConfig) {
     // An ack used to be fire-and-forget. When the write landed in a socket that had already died the
     // sender waited for it forever, and the message was delivered on both sides with the sender still
     // holding it queued: 2 of 50 runs lost exactly that ack and nothing recorded it.
-    if (kind === 'msg' || kind === 'ack') {
+    // An ack goes into the queue only when the write failed. A written ack has nothing left to prove -
+    // it has no acknowledgement of its own - and keeping it queued made `status.queued` show a message
+    // the peer already has, then sit there forever once the socket closed (5 of 6 probe runs).
+    if (kind === 'msg' || (kind === 'ack' && !sent)) {
       store.outbox.append({
         id: envelope.id,
         kind,

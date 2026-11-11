@@ -94,18 +94,23 @@ test('a duplicate of a delivered message is acked again', { timeout: TURN_MS }, 
     const sent = await a.tools.get('p2p_send').execute({ to: fingerprintOf(b.identity.publicKey), text: 'once' })
     await until(() => b.api.store.inbox.all().length === 1, { label: 'B stores the message' })
     await until(() => a.api.store.outbox.size === 0, { label: "A's outbox drains" })
-    // Clear B's queue too: the ack row asserted below has to come from the replay, not the first delivery.
-    b.api.store.outbox.clear()
 
-    // The sender's retry goes the same way the original did: A re-sends the identical envelope to B.
+    // Watch what B writes from here on. A written ack does not enter the outbox (there is nothing left for
+    // it to prove), so the wire is where a re-ack is observable.
+    const acksWritten = []
+    const realSend = b.api.transport.sendTo
+    b.api.transport.sendTo = (publicKey, envelope) => {
+      if (envelope?.kind === 'ack' && envelope.body?.replyTo === sent.messageId) acksWritten.push(envelope.id)
+      return realSend.call(b.api.transport, publicKey, envelope)
+    }
+
+    // The sender's retry travels the same way the original did: A re-sends the identical envelope to B.
     // B already stored this id, so it hits the replay rule - and must answer with an ack anyway.
     const duplicate = signedMessage(a.identity, b.identity.publicKey, sent.messageId, 'once')
     assert.equal(a.api.transport.sendTo(b.identity.publicKey, duplicate), true, 'the duplicate must reach B')
 
-    await until(() => b.api.store.outbox.all().some((entry) => entry.kind === 'ack'), {
-      label: 'the duplicate is re-acked',
-      timeout: 15_000,
-    })
+    await until(() => acksWritten.length > 0, { label: 'the duplicate is re-acked', timeout: 15_000 })
+    b.api.transport.sendTo = realSend
     assert.equal(b.api.store.inbox.all().length, 1, 'a duplicate must not be stored twice')
   } finally {
     a.cleanup()
@@ -160,10 +165,9 @@ test('an ack that cannot be written is queued and counted, not lost', () => {
 })
 
 test('a queued ack is retried on the periodic flush when the socket recovers', { timeout: TURN_MS }, async () => {
-  // The case the timer exists for: the ack could not be written (the socket died at that instant), the
-  // peer stays connected, and nothing else would move that row - `confirmAcksTo` only fires when the peer
-  // talks first. Without the periodic flush the row sits in the outbox forever and "drained" is
-  // unreachable, which is one of the two ways the demo timed out.
+  // The case the timer exists for: the ack could not be written (the socket died at that instant), the peer
+  // stays connected, and nothing else would move that row - `confirmAcksTo` only fires when the peer talks
+  // first. Without the periodic flush the row sits in the outbox forever and "drained" is unreachable.
   process.env.TEST_SECRET = `${SECRET}-flush`
   const a = fleet('flush-a')
   const b = fleet('flush-b')
@@ -171,9 +175,8 @@ test('a queued ack is retried on the periodic flush when the socket recovers', {
     trustEachOther(a, b)
     await until(() => a.api.transport.livePeers().length > 0 && b.api.transport.livePeers().length > 0, { label: 'both connected' })
 
-    // Swallow exactly the ack B tries to write, then let the socket work again.
+    // Every ack B tries to write fails, so the ack has to be queued.
     const realSend = b.api.transport.sendTo
-    const written = []
     b.api.transport.sendTo = (publicKey, envelope) => {
       if (envelope?.kind === 'ack') return false
       return realSend.call(b.api.transport, publicKey, envelope)
@@ -183,17 +186,17 @@ test('a queued ack is retried on the periodic flush when the socket recovers', {
     await until(() => b.api.store.inbox.all().length === 1, { label: 'B stores the message' })
     assert.ok(b.api.store.outbox.all().some((row) => row.kind === 'ack'), 'the ack is queued while the write fails')
 
-    // Socket healthy again; nobody speaks, so only the timer can retry the queued ack.
+    // The socket works again and nobody speaks, so only the timer can move that row.
+    const written = []
     b.api.transport.sendTo = (publicKey, envelope) => {
       written.push(envelope?.kind)
       return realSend.call(b.api.transport, publicKey, envelope)
     }
+    await until(() => written.includes('ack'), { label: 'the periodic flush retried the ack', timeout: 20_000 })
     await until(() => b.api.store.outbox.all().every((row) => row.kind !== 'ack'), {
-      label: 'the periodic flush clears the queued ack',
+      label: 'the retried ack leaves the queue',
       timeout: 20_000,
     })
-    assert.ok(written.includes('ack'), `the flush wrote the ack (saw: ${written.join(',') || 'nothing'})`)
-    // And the sender agrees: its message is confirmed.
     await until(() => a.api.store.outbox.size === 0, { label: "A's message is confirmed" })
   } finally {
     a.cleanup()
