@@ -168,24 +168,49 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
-   * A peer just proved its key on a live socket: everything queued for it can go now.
+   * Sends every queued message that has a live socket, and counts the attempt.
    *
-   * This is the other half of `reply()`. Without it a message queued while the peer was offline would
-   * sit in the outbox until the process restarted, which would make "queued" a lie.
+   * A message stays in the outbox until the peer acks it. "The write returned" is not delivery: two peers
+   * that dial each other at once can each hold a socket the other side already dropped, so the only
+   * evidence that a message arrived is the ack that comes back. After `retryAttempts` tries the row is
+   * marked `undelivered` and stays there for a person to look at, rather than disappearing.
    */
   function flushOutbox(publicKey) {
     const rows = store.outbox.all()
+    const live = transport.livePeers()
     const keep = []
-    let sent = 0
     for (const row of rows) {
-      if (row.to === publicKey && transport.sendTo(publicKey, row)) sent += 1
-      else keep.push(row)
+      const target = row.envelope?.to
+      const attempts = Number(row.attempts ?? 0)
+      if (target === publicKey && live.includes(publicKey) && attempts < config.retryAttempts + 1 && !row.undelivered) {
+        if (transport.sendTo(publicKey, row.envelope)) {
+          keep.push({ ...row, attempts: attempts + 1, lastAttemptAt: new Date().toISOString() })
+          continue
+        }
+      }
+      keep.push(row)
     }
-    if (sent > 0) {
-      store.outbox.clear()
-      for (const row of keep) store.outbox.append(row)
-      log('outbox flushed', `${sent} message(s) to ${fingerprint(publicKey)}`)
-    }
+    store.outbox.clear()
+    for (const row of keep) store.outbox.append(row)
+  }
+
+  /** Re-sends the queue on a timer; a live socket is rare to lose and cheap to retry while it exists. */
+  let retryTimer
+  function startRetries() {
+    if (retryTimer !== undefined) return
+    retryTimer = setInterval(() => {
+      for (const publicKey of transport.livePeers()) flushOutbox(publicKey)
+      for (const row of store.outbox.all()) {
+        if (row.undelivered) continue
+        if (Number(row.attempts ?? 0) > config.retryAttempts) {
+          const rows = store.outbox.all().map((item) => (item.id === row.id ? { ...item, undelivered: true } : item))
+          store.outbox.clear()
+          for (const item of rows) store.outbox.append(item)
+          log('message undelivered', row.id)
+        }
+      }
+    }, 2000)
+    retryTimer.unref?.()
   }
 
   /** An ack removes the matching outbox entry, which is the only way a queued message leaves it. */
@@ -193,10 +218,11 @@ export function apply(ctx, rawConfig) {
     const replyTo = envelope.body?.replyTo
     if (typeof replyTo !== 'string') return
     const rows = store.outbox.all()
-    const kept = rows.filter((row) => row.id !== replyTo)
+    const kept = rows.filter((row) => row.id !== replyTo && row.envelope?.id !== replyTo)
     if (kept.length !== rows.length) {
       store.outbox.clear()
       for (const row of kept) store.outbox.append(row)
+      log('acked', replyTo)
     }
   }
 
@@ -205,9 +231,17 @@ export function apply(ctx, rawConfig) {
     if (identity === undefined) throw new Error('no identity: cannot sign a message')
     const envelope = seal(identity, { kind, to, body, sign })
     const sent = transport.sendTo(to, envelope)
-    // Store the envelope exactly as signed. Metadata added here would change the signed bytes, and the
-    // receiver would reject a flushed message as a forged one.
-    if (!sent) store.outbox.append(envelope)
+    // A `msg` is queued until its ack, not until its write: the envelope goes in exactly as signed, with
+    // the bookkeeping beside it, so a resend is byte-identical and the receiver's signature check passes.
+    if (kind === 'msg') {
+      store.outbox.append({
+        id: envelope.id,
+        envelope,
+        attempts: sent ? 1 : 0,
+        queuedAt: new Date().toISOString(),
+        undelivered: false,
+      })
+    }
     return { envelope, sent }
   }
 
@@ -414,10 +448,12 @@ export function apply(ctx, rawConfig) {
 
   if (enabled && config.autoStart === true) {
     transport.start()
+    startRetries()
   }
 
   // A Host row outlives turns; the sockets and the timer ladder do not outlive the plugin.
   ctx.effect(() => () => {
+    if (retryTimer !== undefined) clearInterval(retryTimer)
     void transport.stop()
   }, 'p2p-bridge.transport()')
 

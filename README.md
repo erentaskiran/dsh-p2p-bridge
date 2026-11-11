@@ -112,6 +112,13 @@ What the suites cover:
   drains, the wake notice carries only a preview; then the negative control, where an untrusted
   peer's message arrives and is dropped with an empty inbox.
 
+Two fleets in two **separate processes**, each with its own `DSH_HOME` and state folder, are covered by
+a script rather than a test, because it spawns children:
+
+```bash
+node scripts/two-node-demo.mjs          # prints a JSON report and "TWO-NODE E2E: PASS"
+```
+
 ## Storage
 
 `~/.dsh/p2p/` (or `$DSH_HOME/p2p` when the host sets one):

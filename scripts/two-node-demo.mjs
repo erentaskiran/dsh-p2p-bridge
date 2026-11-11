@@ -8,10 +8,13 @@
  * homes under a temp directory, trusts each side's key in the other's peer table, starts one child
  * process per fleet, sends from A, and prints what B received and how it was woken.
  *
- *   node scripts/two-node-demo.mjs            # local, both fleets on this machine
- *   node scripts/two-node-demo.mjs --keep     # keep the temp homes for inspection
+ *   node scripts/two-node-demo.mjs                     # local, both fleets on this machine
+ *   node scripts/two-node-demo.mjs --keep              # keep the temp homes for inspection
+ *   P2P_REJECT_SENDER=1 node scripts/two-node-demo.mjs # negative control: receiver withholds trust
  *
  * Exit code 0 means B stored exactly one message and its agent was woken with a preview notice.
+ * With `P2P_REJECT_SENDER=1` the receiver leaves the sender `pending` instead, and the run must fail:
+ * the message arrives and is dropped, which is the trust gate doing its job on the real wire.
  */
 import { spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
@@ -41,7 +44,7 @@ const dir = process.env.P2P_DIR
 const wakes = []
 const tools = new Map()
 const ctx = {
-  logger: () => ({ warn: () => {} }),
+  logger: () => ({ warn: (...args) => { if (process.env.P2P_DEBUG === '1') console.error('[warn]', role, ...args.map(String)) } }),
   tools: { register: (tool) => tools.set(tool.name, tool) },
   agents: { get: (id) => (id === 'session-demo' ? { status: 'idle', followup: (m) => wakes.push(m), steer: (m) => wakes.push(m) } : undefined) },
   systemPrompt: { getSectionOrder: () => 10, section: () => {} },
@@ -112,7 +115,7 @@ async function buildHomes() {
         publicKey: other.identity.publicKey,
         fingerprint: other.identity.fingerprint,
         label: `demo-${role === 'sender' ? 'receiver' : 'sender'}`,
-        status: 'trusted',
+        status: process.env.P2P_REJECT_SENDER === '1' && role === 'receiver' ? 'pending' : 'trusted',
         firstSeen: new Date().toISOString(),
         lastSeen: new Date().toISOString(),
       }],
