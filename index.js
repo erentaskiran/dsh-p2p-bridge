@@ -101,6 +101,10 @@ export function apply(ctx, rawConfig) {
     maxBytes: config.maxMessageBytes,
   })
   transport.useSeen(store.seen)
+  // A refresh is the moment a queued message may finally find a socket; drain on it.
+  transport.onWake = () => {
+    for (const publicKey of transport.livePeers()) flushOutbox(publicKey)
+  }
 
   /** What happened to envelopes, for tests and diagnostics: arrival is distinct from delivery. */
   const stats = { received: 0, delivered: 0, dropped: 0 }
@@ -114,6 +118,7 @@ export function apply(ctx, rawConfig) {
    */
   function handle(envelope) {
     if (envelope.kind === 'msg') stats.received += 1
+    confirmAcksTo(envelope.from)
     const sender = store.peers.observe({
       publicKey: envelope.from,
       fingerprint: fingerprint(envelope.from),
@@ -225,6 +230,21 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
+   * Drops the acks we still had queued for a peer once that peer talks to us again.
+   *
+   * An ack carries no acknowledgement of its own, so the next envelope from that peer is the evidence
+   * that the pipe carries our writes: keeping the entry any longer would only re-send an ack the peer
+   * already has.
+   */
+  function confirmAcksTo(publicKey) {
+    const rows = store.outbox.all()
+    const keep = rows.filter((row) => !(row.kind === 'ack' && row.envelope?.to === publicKey))
+    if (keep.length === rows.length) return
+    store.outbox.clear()
+    for (const row of keep) store.outbox.append(row)
+  }
+
+  /**
    * A duplicate of a message we already delivered gets its ack again, and nothing else.
    *
    * The sender retries until it hears an ack, so the same id arriving twice is normal, not an attack. The
@@ -255,11 +275,16 @@ export function apply(ctx, rawConfig) {
     if (identity === undefined) throw new Error('no identity: cannot sign a message')
     const envelope = seal(identity, { kind, to, body, sign })
     const sent = transport.sendTo(to, envelope)
-    // A `msg` is queued until its ack, not until its write: the envelope goes in exactly as signed, with
-    // the bookkeeping beside it, so a resend is byte-identical and the receiver's signature check passes.
-    if (kind === 'msg') {
+    // Both a message and an ack are queued until they are *confirmed*: a message by its ack, an ack by
+    // nothing at all, so it is simply retried until the peer is heard from or the attempts run out.
+    //
+    // An ack used to be fire-and-forget. When the write landed in a socket that had already died the
+    // sender waited for it forever, and the message was delivered on both sides with the sender still
+    // holding it queued: 2 of 50 runs lost exactly that ack and nothing recorded it.
+    if (kind === 'msg' || kind === 'ack') {
       store.outbox.append({
         id: envelope.id,
+        kind,
         envelope,
         attempts: sent ? 1 : 0,
         queuedAt: new Date().toISOString(),

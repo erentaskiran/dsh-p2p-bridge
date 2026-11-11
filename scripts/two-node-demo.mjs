@@ -90,7 +90,8 @@ try {
   }
 } catch (error) {
   // A failed wait must not look like a clean exit: print why, and exit non-zero.
-  console.log(JSON.stringify({ event: 'error', role, message: error.message, stats: api.stats, wakes: wakes.length }))
+  const outbox = api.store.outbox.all().map((row) => ({ id: row.id?.slice(0, 8), attempts: row.attempts, undelivered: row.undelivered, to: String(row.envelope?.to).slice(0, 8) }))
+  console.log(JSON.stringify({ event: 'error', role, message: error.message, stats: api.stats, wakes: wakes.length, outboxStates: outbox, livePeers: api.transport.livePeers().length }))
   await api.transport.stop()
   process.exit(1)
 }
