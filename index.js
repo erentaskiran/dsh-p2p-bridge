@@ -200,6 +200,12 @@ export function apply(ctx, rawConfig) {
       const attempts = Number(row.attempts ?? 0)
       if (target === publicKey && live.includes(publicKey) && attempts < config.retryAttempts + 1 && !row.undelivered) {
         if (transport.sendTo(publicKey, row.envelope)) {
+          // An ack has no acknowledgement of its own, so a successful write is as confirmed as it ever
+          // gets: keeping it would leave the queue non-empty forever and make "drained" unreachable. If
+          // this ack was the one that got lost, the peer retries the message, hits the replay rule and
+          // is answered again by `reacknowledge` - that loop, not a permanently queued ack, is what makes
+          // the message recoverable.
+          if (row.kind === 'ack') continue
           keep.push({ ...row, attempts: attempts + 1, lastAttemptAt: new Date().toISOString() })
           continue
         }

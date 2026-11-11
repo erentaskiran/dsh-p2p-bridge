@@ -158,3 +158,45 @@ test('an ack that cannot be written is queued and counted, not lost', () => {
     b.cleanup()
   }
 })
+
+test('a queued ack is retried on the periodic flush when the socket recovers', { timeout: TURN_MS }, async () => {
+  // The case the timer exists for: the ack could not be written (the socket died at that instant), the
+  // peer stays connected, and nothing else would move that row - `confirmAcksTo` only fires when the peer
+  // talks first. Without the periodic flush the row sits in the outbox forever and "drained" is
+  // unreachable, which is one of the two ways the demo timed out.
+  process.env.TEST_SECRET = `${SECRET}-flush`
+  const a = fleet('flush-a')
+  const b = fleet('flush-b')
+  try {
+    trustEachOther(a, b)
+    await until(() => a.api.transport.livePeers().length > 0 && b.api.transport.livePeers().length > 0, { label: 'both connected' })
+
+    // Swallow exactly the ack B tries to write, then let the socket work again.
+    const realSend = b.api.transport.sendTo
+    const written = []
+    b.api.transport.sendTo = (publicKey, envelope) => {
+      if (envelope?.kind === 'ack') return false
+      return realSend.call(b.api.transport, publicKey, envelope)
+    }
+
+    await a.tools.get('p2p_send').execute({ to: fingerprintOf(b.identity.publicKey), text: 'flush me' })
+    await until(() => b.api.store.inbox.all().length === 1, { label: 'B stores the message' })
+    assert.ok(b.api.store.outbox.all().some((row) => row.kind === 'ack'), 'the ack is queued while the write fails')
+
+    // Socket healthy again; nobody speaks, so only the timer can retry the queued ack.
+    b.api.transport.sendTo = (publicKey, envelope) => {
+      written.push(envelope?.kind)
+      return realSend.call(b.api.transport, publicKey, envelope)
+    }
+    await until(() => b.api.store.outbox.all().every((row) => row.kind !== 'ack'), {
+      label: 'the periodic flush clears the queued ack',
+      timeout: 20_000,
+    })
+    assert.ok(written.includes('ack'), `the flush wrote the ack (saw: ${written.join(',') || 'nothing'})`)
+    // And the sender agrees: its message is confirmed.
+    await until(() => a.api.store.outbox.size === 0, { label: "A's message is confirmed" })
+  } finally {
+    a.cleanup()
+    b.cleanup()
+  }
+})
