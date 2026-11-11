@@ -106,20 +106,17 @@ so either use the glob or name the files:
 node --test test/protocol.test.js test/e2e.test.js test/restart.test.js
 ```
 
-The suite is 22 tests; four of them are negative controls that must fail when the guard they cover is
-removed (signature check, trust gate, ack handling, replay persistence). Removing a guard and watching
-the suite stay green means the guard is untested, not that it is unnecessary.
+The suite is 45 tests in 10 files; several are negative controls that must fail when the guard they
+cover is removed (signature check, trust gate, ack handling, replay persistence, the flush call, the
+stale-socket drop, the liveness ping). Removing a guard and watching the suite stay green means the
+guard is untested, not that it is unnecessary. `test/guards.test.js` pins the guard call sites and
+fails the suite when a negative control was left switched on in the tree.
 
-What the suites cover:
-
-- `test/protocol.test.js` — envelope rules: wrong version, missing signature, forged signature,
-  oversize body, replayed id, wrong recipient, unknown kind, canonical signing bytes, the read cap.
-- `test/e2e.test.js` — two real swarms in one process: A sends, B receives and acks, A's outbox
-  drains, the wake notice carries only a preview; then the negative control, where an untrusted
-  peer's message arrives and is dropped with an empty inbox.
-- `test/restart.test.js` — the replay window across a process boundary: an id accepted by one process
-  is refused by the next, with a negative control that turns persistence off and shows the id being
-  accepted again.
+A full run takes about 55 s, most of it connection setup. Parallel runs are the ones that can be slow:
+`node --test` executes files concurrently, so several DHT joins compete at once and a pair can take
+longer than the 60 s budget. If you see a rare `timed out waiting for both connected` under load, that
+is the harness, not the bridge — rerun serially with `node --test --test-concurrency=1 'test/*.test.js'`
+before believing it.
 
 Two fleets in two **separate processes**, each with its own `DSH_HOME` and state folder, are covered by
 a script rather than a test, because it spawns children:
@@ -128,6 +125,29 @@ a script rather than a test, because it spawns children:
 node scripts/two-node-demo.mjs                     # prints a JSON report and "TWO-NODE E2E: PASS"
 P2P_REJECT_SENDER=1 node scripts/two-node-demo.mjs # negative control: receiver withholds trust
 ```
+
+What the files cover:
+
+- `test/protocol.test.js` — envelope rules: wrong version, missing signature, forged signature,
+  oversize body, replayed id, wrong recipient, unknown kind, canonical signing bytes, the read cap.
+- `test/e2e.test.js` — two real swarms in one process: A sends, B receives and acks, A's outbox
+  drains, the wake notice carries only a preview; then the negative control, where an untrusted
+  peer's message arrives and is dropped with an empty inbox.
+- `test/restart.test.js` — the replay window across a process boundary, with a negative control that
+  turns persistence off and shows the id being accepted again.
+- `test/retry.test.js` — the retry ladder against real sockets: a failed ack is queued, the periodic
+  flush moves it, and a message queued before the peer was verified is retried once a socket exists.
+- `test/steady.test.js` — Test A: fifty messages down **one** established connection, each delivered
+  once, acked once, one wake each. If this fails the bug is ours; if it passes and the two-process
+  demo still loses runs, the loss is in connection setup.
+- `test/flush.test.js`, `test/flush-stress.test.js` — the flush and give-up path driven directly, no
+  timer and no network; the stress file repeats it 200 times to make a rare state show up.
+- `test/status.test.js` — the payload shapes of `p2p_status`, `p2p_peers`, `p2p_inbox`: fingerprints,
+  never keys.
+- `test/load.test.js` — every tool schema against the Host's own JSON Schema subset, so a schema the
+  real registrar would refuse cannot pass here while the plugin fails to mount.
+- `test/guards.test.js` — the guard call sites still exist, and no negative control is left switched
+  on in the working tree.
 
 ## Storage
 

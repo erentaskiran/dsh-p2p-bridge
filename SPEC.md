@@ -197,7 +197,24 @@ rediscover them from scratch.
   found each other inside 20 s while the suite ran several pairs at once. The connection waits are 60 s
   now, and each test's own timeout is 180 s, because a test whose timeout equals its wait budget dies at
   the same instant the wait would have succeeded. Verified afterwards: `/tmp/tap-final-220588d/`, 50
-  suite runs, all `tests 39 / pass 39 / fail 0`.
+  suite runs, all `tests 39 / pass 39 / fail 0` (that series predates the current 45-test suite; the
+  series that covers HEAD is `/tmp/tap-final-bdb531d/`, see the acceptance table).
+- **The suite flakes under parallel load, and only there.** `node --test` runs test files concurrently,
+  so several swarm pairs join the DHT at once and one pair can take longer than its connection budget.
+  Measured on the 35-test tree: `/tmp/mytap30/` - 50 parallel runs, **12 red**, and every failure is a
+  connection wait (`11 x timed out waiting for both connected after 20000ms`, `3 x timed out waiting for
+  one connection after 30000ms`), not once a protocol or delivery assertion. Those runs predate the 60 s
+  budgets (`dd09ea0`, 16:12), which is why the waits they name are 20 s and 30 s - at a 60 s budget the
+  same contention would have passed. Measured again at HEAD: `/tmp/tap-final-bdb531d/`, 50 parallel
+  runs of the 45-test suite, **49 green and 1 red**; the red one is `run-10.log`, `timed out waiting
+  for both swarms connected after 60000ms` in `test/e2e.test.js`, with the other 44 tests in that same
+  run passing. So the flake survives a longer budget: it is rarer, not gone. A serial run
+  (`node --test --test-concurrency=1 'test/*.test.js'`) removes the contention entirely - that is the
+  cross-check to run before believing any connection timeout here.
+- **An earlier version of this file claimed "70 consecutive TAP runs" green.** That count was never
+  real: the 50 logs behind it (`/tmp/tap-4a9c9b1/`) all say `tests 0` - `node --test` had been pointed
+  at a path it did not expand, so nothing ran - and the other 20 (`/tmp/tap-dcc41df/`) are the 32-test
+  tree. The claim is removed; what stands now is a re-run series whose every log states its test count.
 - **One more failure, seen once and not explained:** `/tmp/tap-dd09ea0/run-1.log` →
   `AssertionError: the flush kept retrying (wrote 0 time(s))` in `test/flush.test.js`. It did not repeat
   in 15 isolated runs, 4 full-suite runs, 20 serial suite runs (`/tmp/serial/`, all zero failures), 200
@@ -242,7 +259,7 @@ Each line names the artefact that shows it. A criterion without a file is a clai
 | Test A — 50 messages over one established connection, each delivered once, acked, one wake | `/tmp/p2p-steady50-7cfb832.txt` → `TOTAL 50 PASS / 0 FAIL of 50` (50 runs × 50 messages) |
 | Test B — 50 fresh pairs, a message crossing in **both** directions each time, with no message left queued | `/tmp/p2p-twoway-50-flushed.txt` → `runs 50 / bothWays 50 / oneWay 0 / neither 0`, median 3946 ms, p95 4352, max 4572; `outbox:0` on all 100 side-reports, zero residue |
 | Two-process demo — 50 consecutive runs | `/tmp/p2p-flake50-4a9c9b1.txt` → `TOTAL 50 PASS / 0 FAIL of 50`, zero witness files |
-| Suite green, repeated | `/tmp/tap-final-220588d/` → 50 runs, every log `tests 39 / pass 39 / fail 0`, zero zero-test logs |
+| Suite green, repeated | `/tmp/tap-final-bdb531d/` → 50 parallel runs on the 45-test suite, every log `tests 45`, 49 `pass 45 / fail 0`; the one red run is `run-10.log` → `timed out waiting for both swarms connected after 60000ms` in `test/e2e.test.js` (the DHT budget under parallel load, not a delivery failure: 44 tests still passed); serial cross-check `/tmp/serial-bdb531d/` → 10 runs with `--test-concurrency=1`, all 10 `tests 45 / pass 45 / fail 0`, ~53 s each |
 | Negative controls: removing the guard turns the suite red | all seven measured red on `4a9c9b1`: signature 34/1, trust gate 34/1, `seen.save()` 34/1, `acknowledge()` 30/5, flush call 34/1, `dropStaleSockets()` 34/1, `pingQuietPeers()` 34/1; restored run 35/0 |
 | No key leaves the plugin | `test/status.test.js` asserts the payload shape of `p2p_status`, `p2p_peers` and `p2p_inbox`; re-adding `publicKey` turns it red |
 | Every tool schema passes the Host's own subset check, so the plugin mounts | `test/load.test.js` imports DSH's `assertObjectJsonSchema` / `assertSupportedJsonSchema` and runs them over all four tools; restoring `type: ['string','null']` turns it red with the exact `JsonSchemaError` the boot produced |
