@@ -212,7 +212,7 @@ Each line names the artefact that shows it. A criterion without a file is a clai
 | Criterion | Evidence |
 |---|---|
 | Test A — 50 messages over one established connection, each delivered once, acked, one wake | `/tmp/p2p-steady50-7cfb832.txt` → `TOTAL 50 PASS / 0 FAIL of 50` (50 runs × 50 messages) |
-| Test B — 50 fresh pairs, a message crossing in **both** directions each time | `/tmp/p2p-twoway-50-4a9c9b1.txt` → `runs 50 / bothWays 50 / oneWay 0 / neither 0`, median 3970 ms, p95 4497, max 4870 |
+| Test B — 50 fresh pairs, a message crossing in **both** directions each time, with no message left queued | `/tmp/p2p-twoway-50-flushed.txt` → `runs 50 / bothWays 50 / oneWay 0 / neither 0`, median 3946 ms, p95 4352, max 4572; `outbox:0` on all 100 side-reports, zero residue |
 | Two-process demo — 50 consecutive runs | `/tmp/p2p-flake50-4a9c9b1.txt` → `TOTAL 50 PASS / 0 FAIL of 50`, zero witness files |
 | Suite green, repeated | `npm test` → 35 passing; `/tmp/tap-4a9c9b1/` 50 TAP runs, zero `not ok` |
 | Negative controls: removing the guard turns the suite red | all seven measured red on `4a9c9b1`: signature 34/1, trust gate 34/1, `seen.save()` 34/1, `acknowledge()` 30/5, flush call 34/1, `dropStaleSockets()` 34/1, `pingQuietPeers()` 34/1; restored run 35/0 |

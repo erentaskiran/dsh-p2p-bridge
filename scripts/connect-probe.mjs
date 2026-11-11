@@ -75,6 +75,9 @@ try {
   out.gotMs = got ? Date.now() - started : null
   out.wakes = wakes.length
   // Wait longer than the retry ladder so a residue is a real loss, not an in-flight retry.
+  // Flush before judging the queue: an ack still in the socket buffer is not a lost ack, and stopping the
+  // transport with buffered bytes is exactly how the demo lost two acks in fifty runs.
+  await api.flushWrites(5000)
   const drained = await wait(() => api.store.outbox.size === 0, 20000)
   out.ackedOutbox = drained ? 0 : api.store.outbox.size
   if (!drained) {
@@ -95,6 +98,7 @@ try {
 }
 out.stats = api.stats
 console.log(JSON.stringify(out))
+await api.flushWrites(5000)
 await api.transport.stop()
 process.exit(0)
 `
