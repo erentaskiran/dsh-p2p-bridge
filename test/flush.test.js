@@ -91,8 +91,15 @@ test('a message that never gets its ack is marked undelivered, not dropped', () 
     h.api.transport.sendTo = (_publicKey, envelope) => { writes.push(envelope.id); return true }
     // One pass both writes the row and applies the ladder; the writes are the proof that the pass did its
     // flush half, so deleting that half makes this fail rather than pass by luck.
-    for (let round = 0; round < 4; round += 1) h.api.retryPass()
-    assert.ok(writes.length >= 3, `the flush kept retrying (wrote ${writes.length} time(s))`)
+    const trace = []
+    for (let round = 0; round < 4; round += 1) {
+      h.api.retryPass()
+      const row = h.api.store.outbox.all()[0]
+      trace.push({ round, writes: writes.length, attempts: row?.attempts, undelivered: row?.undelivered })
+    }
+    // The trace is in the message on purpose: this assertion failed once in fifty suite runs with
+    // "wrote 0 time(s)" and gave nothing to diagnose it with.
+    assert.ok(writes.length >= 3, `the flush kept retrying (wrote ${writes.length} time(s)); trace=${JSON.stringify(trace)}`)
     const rows = h.api.store.outbox.all()
     assert.equal(rows.length, 1, 'the row is kept, not silently dropped')
     assert.equal(rows[0].undelivered, true, 'and it is marked undelivered so status counts it')
