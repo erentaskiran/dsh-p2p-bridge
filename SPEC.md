@@ -190,10 +190,16 @@ Facts measured on this machine that did not become bugs, recorded so a later rea
 rediscover them from scratch.
 
 - **A single run of the test suite once reported `26 pass / 2 fail`** (on `f2b2ed4`, while committing:
-  the assertion output was not captured). It has not repeated in 70 consecutive TAP runs
-  (`/tmp/tap-dcc41df/`, 20 runs on `dcc41df`; `/tmp/tap-4a9c9b1/`, 50 runs on `4a9c9b1`), all with zero
-  `not ok` lines. The failure is unexplained, not absent: treat any red run as real evidence until the
-  failing test is named, and do not average it away.
+  the assertion output was not captured). Root cause found on 2026-11-11: fifty suite runs produced
+  `/tmp/tap-30cb70b-50/run-44.log`, naming both tests - "a duplicate of a delivered message is acked
+  again" and "a duplicate of a message that was never delivered is not acked" - each failing with
+  `timed out waiting for both connected after 20000ms`. The retry logic was fine; two swarms had not
+  found each other inside 20 s while the suite ran several pairs at once. The connection waits are 60 s
+  now, since connection setup is the DHT's timing and the two-process probe measures it separately.
+- **One more failure, seen once and not explained:** `/tmp/tap-dd09ea0/run-1.log` →
+  `AssertionError: the flush kept retrying (wrote 0 time(s))` in `test/flush.test.js`. It did not repeat
+  in 15 isolated runs or 4 full-suite runs afterwards. The assertion now prints a per-round trace so the
+  next occurrence is diagnosable; the cause is unknown and is not guessed at here.
 - **`livePeers()` is not a delivery metric.** The first connection probe asked whether each side's
   `livePeers()` listed the other and reported `bothSaw: 0/50` while messages were crossing normally.
   Both peers dial at once, hyperswarm keeps one socket per side, and the two sides can keep different
@@ -214,7 +220,7 @@ Each line names the artefact that shows it. A criterion without a file is a clai
 | Test A — 50 messages over one established connection, each delivered once, acked, one wake | `/tmp/p2p-steady50-7cfb832.txt` → `TOTAL 50 PASS / 0 FAIL of 50` (50 runs × 50 messages) |
 | Test B — 50 fresh pairs, a message crossing in **both** directions each time, with no message left queued | `/tmp/p2p-twoway-50-flushed.txt` → `runs 50 / bothWays 50 / oneWay 0 / neither 0`, median 3946 ms, p95 4352, max 4572; `outbox:0` on all 100 side-reports, zero residue |
 | Two-process demo — 50 consecutive runs | `/tmp/p2p-flake50-4a9c9b1.txt` → `TOTAL 50 PASS / 0 FAIL of 50`, zero witness files |
-| Suite green, repeated | `npm test` → 35 passing; `/tmp/tap-4a9c9b1/` 50 TAP runs, zero `not ok` |
+| Suite green, repeated | `npm test` → 35 passing; `/tmp/tap-30cb70b-50/` 50 runs, 49 green, the one red run explained and fixed by the 60 s connection budget (see Known observations) |
 | Negative controls: removing the guard turns the suite red | all seven measured red on `4a9c9b1`: signature 34/1, trust gate 34/1, `seen.save()` 34/1, `acknowledge()` 30/5, flush call 34/1, `dropStaleSockets()` 34/1, `pingQuietPeers()` 34/1; restored run 35/0 |
 | No key leaves the plugin | `p2p_status`/`p2p_peers` carry fingerprints only; `test/` asserts the payload shape |
 | Replay window survives a restart | `test/restart.test.js`, two processes |
