@@ -385,7 +385,10 @@ export function apply(ctx, rawConfig) {
         type: 'object',
         properties: {
           enabled: { type: 'boolean' },
-          fingerprint: { type: ['string', 'null'] },
+          // `oneOf` rather than `type: ['string', 'null']`: DSH's schema subset takes exactly one type
+          // string, and a type array made the whole plugin fail to mount at boot while every test passed,
+          // because the tests call `apply()` with a stand-in ctx and never run the Host's validator.
+          fingerprint: { oneOf: [{ type: 'string' }, { type: 'null' }] },
           topicPeers: { type: 'number' },
           trustedPeers: { type: 'number' },
           unread: { type: 'number' },

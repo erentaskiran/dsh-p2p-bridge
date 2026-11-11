@@ -203,7 +203,21 @@ rediscover them from scratch.
   in 15 isolated runs, 4 full-suite runs, 20 serial suite runs (`/tmp/serial/`, all zero failures), 200
   fresh instances in `test/flush-stress.test.js`, or any of the 50 runs in `/tmp/tap-final-220588d/`.
   The assertion prints a per-round trace so the next occurrence is diagnosable; the cause is unknown and
-  is not guessed at here.
+  is not guessed at here. Attempted trigger: `/tmp/wrote0/loop1000.txt` → `{"rounds":1000,"badRounds":0}`
+  (1000 fresh instances, same harness, same four `retryPass()` rounds, no timer and no network) — the
+  path did not reproduce once in 1000, so it is not a plain bug in the retry ladder. It stays an open,
+  recorded observation rather than a fixed thing.
+- **The plugin did not mount, and 42 green tests did not notice.** `p2p_status` declared
+  `fingerprint: { type: ['string', 'null'] }`. DSH's schema subset takes exactly one type string, so
+  `ctx.tools.register` threw `JsonSchemaError: schema.properties.fingerprint.type must be a single type
+  string` and the whole plugin failed to load — while the suite stayed green, because every test calls
+  `apply()` with a stand-in ctx whose `register` only files the tool in a `Map` and never runs the Host's
+  validator. Found on 2026-11-11 when the web profile was restarted and the p2p tools were gone. Fixed by
+  spelling nullable as `oneOf: [{ type: 'string' }, { type: 'null' }]`, and closed with `test/load.test.js`,
+  which imports the Host's own `assertObjectJsonSchema` / `assertSupportedJsonSchema` and runs them over
+  all four tools. Turning the type array back on fails that test
+  (`p2p_status.output.schema: … must be a single type string`). The general lesson: **a schema that only a
+  test's fake registrar sees is not a tested schema.**
 - **A promised test that did not exist.** The acceptance table named `test/` as evidence for "no key
   leaves the plugin" while the suite had no such test, and `p2p_inbox` was in fact returning the sender's
   public key. Both fixed (`test/status.test.js`, `publicMessage` in `index.js`), but the lesson stays: a
@@ -231,6 +245,7 @@ Each line names the artefact that shows it. A criterion without a file is a clai
 | Suite green, repeated | `/tmp/tap-final-220588d/` → 50 runs, every log `tests 39 / pass 39 / fail 0`, zero zero-test logs |
 | Negative controls: removing the guard turns the suite red | all seven measured red on `4a9c9b1`: signature 34/1, trust gate 34/1, `seen.save()` 34/1, `acknowledge()` 30/5, flush call 34/1, `dropStaleSockets()` 34/1, `pingQuietPeers()` 34/1; restored run 35/0 |
 | No key leaves the plugin | `test/status.test.js` asserts the payload shape of `p2p_status`, `p2p_peers` and `p2p_inbox`; re-adding `publicKey` turns it red |
+| Every tool schema passes the Host's own subset check, so the plugin mounts | `test/load.test.js` imports DSH's `assertObjectJsonSchema` / `assertSupportedJsonSchema` and runs them over all four tools; restoring `type: ['string','null']` turns it red with the exact `JsonSchemaError` the boot produced |
 | Replay window survives a restart | `test/restart.test.js`, two processes |
 | `undelivered` is counted, never silent | `test/flush.test.js`, and `p2p_status.queued` / `undelivered` |
 
