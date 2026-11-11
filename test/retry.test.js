@@ -57,7 +57,10 @@ function fleet(tag, { offline = false } = {}) {
   return { dir, tools, api, identity, cleanup: () => { ctx._cleanup?.(); rmSync(dir, { recursive: true, force: true }) } }
 }
 
-async function until(check, { timeout = 20_000, label = 'condition' } = {}) {
+// Connecting two swarms is the DHT's timing, not this file's behaviour: when the whole suite runs several
+// pairs at once, 20 s was not enough (measured once in fifty suite runs, `run-44`, both retry tests timing
+// out on `both connected`). The budget is generous so a slow DHT is a delay, not a false failure.
+async function until(check, { timeout = 60_000, label = 'condition' } = {}) {
   const started = Date.now()
   for (;;) {
     if (await check()) return

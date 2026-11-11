@@ -48,7 +48,7 @@ function fleet(tag) {
   return { dir, tools, wakes, api, identity, cleanup: () => { ctx._cleanup?.(); rmSync(dir, { recursive: true, force: true }) } }
 }
 
-async function until(check, { timeout = 30_000, label = 'condition' } = {}) {
+async function until(check, { timeout = 60_000, label = 'condition' } = {}) {
   const started = Date.now()
   for (;;) {
     if (await check()) return

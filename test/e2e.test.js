@@ -43,7 +43,8 @@ function fleet(tag) {
 }
 
 /** Waits until `check()` is truthy, polling without a fixed sleep in the assertion path. */
-async function until(check, { timeout = 20_000, label = 'condition' } = {}) {
+// See the note in retry.test.js: connection setup is DHT timing, so a slow pair must not look like a bug.
+async function until(check, { timeout = 60_000, label = 'condition' } = {}) {
   const started = Date.now()
   for (;;) {
     if (await check()) return
