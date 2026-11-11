@@ -121,3 +121,80 @@ test('a flush with no socket leaves the row alone and does not count a failed at
     h.cleanup()
   }
 })
+
+test('an unverified socket is dropped after the stale window', async () => {
+  // `dropStaleSockets` earns its place by measurement: with it the 50-run demo was 50/50, and without it
+  // one run in fifty never got a live peer. This pins the behaviour, so deleting the call fails here
+  // instead of showing up as a rare flake.
+  const h = harness()
+  try {
+    const destroyed = []
+    const fakeSocket = { destroyed: false, writable: true, destroy() { this.destroyed = true; destroyed.push(1) }, on() {}, setNoDelay() {} }
+    h.api.transport.swarm = { leave() {}, join: () => ({ flushed: async () => {} }) }
+    h.api.transport.topic = Buffer.alloc(32)
+    const peer = h.api.transport.accept(fakeSocket, { publicKey: Buffer.alloc(32, 7) })
+    assert.equal(h.api.transport.connections.size, 1)
+
+    // Not stale yet.
+    assert.equal(h.api.transport.dropStaleSockets(6000), 0)
+    assert.equal(h.api.transport.connections.size, 1)
+
+    // Older than the window and still unverified: it goes, and the topic is refreshed so a clean dial can
+    // happen. Driven through the keep-alive body, so deleting the call site fails here too.
+    peer.createdAt = Date.now() - 10_000
+    h.api.transport.keepAliveTick()
+    assert.equal(h.api.transport.connections.size, 0)
+    assert.equal(destroyed.length, 1, 'the socket was destroyed by the keep-alive pass')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('a verified socket is never treated as stale', () => {
+  const h = harness()
+  try {
+    const fakeSocket = { destroyed: false, writable: true, destroy() { this.destroyed = true }, on() {}, setNoDelay() {} }
+    h.api.transport.accept(fakeSocket, { publicKey: Buffer.alloc(32, 8) })
+    const peer = [...h.api.transport.connections.values()][0]
+    peer.publicKey = h.peer.publicKey
+    peer.createdAt = Date.now() - 60_000
+    assert.equal(h.api.transport.dropStaleSockets(6000), 0, 'a peer that answered is left alone')
+    assert.equal(h.api.transport.connections.size, 1)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('a peer that stops answering pings is dropped, and one that answers is kept', () => {
+  // `pingQuietPeers` asks a different question from "is the socket open": a socket can report writable
+  // while the far side has already reset its half, so liveness is "did anybody answer". Fake both peers.
+  const h = harness()
+  try {
+    const silent = { destroyed: false, writable: true, destroy() { this.destroyed = true }, on() {}, setNoDelay() {} }
+    const chatty = { destroyed: false, writable: true, destroy() { this.destroyed = true }, on() {}, setNoDelay() {} }
+    h.api.transport.swarm = { leave() {}, join: () => ({ flushed: async () => {} }) }
+    h.api.transport.topic = Buffer.alloc(32)
+    h.api.transport.accept(silent, { publicKey: Buffer.alloc(32, 1) })
+    h.api.transport.accept(chatty, { publicKey: Buffer.alloc(32, 2) })
+    const [silentPeer, chattyPeer] = [...h.api.transport.connections.values()]
+    silentPeer.publicKey = h.peer.publicKey
+    chattyPeer.publicKey = 'someone-else'
+    h.api.transport.onPing = () => ({ kind: 'ping' })
+    h.api.transport.sendOn = () => true
+
+    // Nobody has been heard from, both are quiet: the first pass pings, the third drops.
+    h.api.transport.lastHeard.set(h.peer.publicKey, 0)
+    h.api.transport.lastHeard.set('someone-else', Date.now())
+    // Driven through the keep-alive pass, so deleting the call site fails this test as well.
+    const pass = () => h.api.transport.keepAliveTick()
+    pass()
+    assert.equal(silent.destroyed, false, 'the first quiet pass only pings')
+    pass()
+    assert.equal(silent.destroyed, false, 'the second still tolerates it')
+    pass()
+    assert.equal(silent.destroyed, true, 'the silent socket was destroyed')
+    assert.equal(chatty.destroyed, false, 'the peer that was heard from is untouched')
+  } finally {
+    h.cleanup()
+  }
+})
