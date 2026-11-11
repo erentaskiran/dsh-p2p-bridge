@@ -108,7 +108,7 @@ export function apply(ctx, rawConfig) {
   }
 
   /** What happened to envelopes, for tests and diagnostics: arrival is distinct from delivery. */
-  const stats = { received: 0, delivered: 0, dropped: 0 }
+  const stats = { received: 0, delivered: 0, dropped: 0, acksReceived: 0 }
 
   /** Session the plugin wakes: the one that owns this Host row, or the configured one. */
   const wakeSession = () => config.sessionId ?? ctx.session?.id
@@ -132,6 +132,7 @@ export function apply(ctx, rawConfig) {
       return
     }
     if (envelope.kind === 'ack') {
+      stats.acksReceived += 1
       acknowledge(envelope)
       return
     }
@@ -202,12 +203,13 @@ export function apply(ctx, rawConfig) {
    */
   function flushOutbox(publicKey) {
     const rows = store.outbox.all()
-    const live = transport.livePeers()
     const keep = []
     for (const row of rows) {
       const target = row.envelope?.to
       const attempts = Number(row.attempts ?? 0)
-      if (target === publicKey && live.includes(publicKey) && attempts < config.retryAttempts + 1 && !row.undelivered) {
+      // `sendTo` decides whether a socket exists; requiring `livePeers` here skipped rows queued in the
+      // window before the peer was verified, which is exactly when the first write was lost.
+      if (target === publicKey && attempts < config.retryAttempts + 1 && !row.undelivered) {
         if (transport.sendTo(publicKey, row.envelope)) {
           // An ack has no acknowledgement of its own, so a successful write is as confirmed as it ever
           // gets: keeping it would leave the queue non-empty forever and make "drained" unreachable. If
@@ -272,6 +274,14 @@ export function apply(ctx, rawConfig) {
     reply({ kind: 'ack', to: envelope.from, body: { replyTo: envelope.id } })
   }
 
+  /** Raises one row's attempt count without a full rewrite when only that row changed. */
+  function bumpAttempts(storeRef, id) {
+    const rows = storeRef.outbox.all()
+    const next = rows.map((row) => (row.id === id ? { ...row, attempts: Number(row.attempts ?? 0) + 1, lastAttemptAt: new Date().toISOString() } : row))
+    storeRef.outbox.clear()
+    for (const row of next) storeRef.outbox.append(row)
+  }
+
   /** An ack removes the matching outbox entry, which is the only way a queued message leaves it. */
   function acknowledge(envelope) {
     const replyTo = envelope.body?.replyTo
@@ -289,17 +299,27 @@ export function apply(ctx, rawConfig) {
   function reply({ kind, to, body }) {
     if (identity === undefined) throw new Error('no identity: cannot sign a message')
     const envelope = seal(identity, { kind, to, body, sign })
+    // Queue before the write, not after. Writing first leaves a window in which the peer's ack arrives,
+    // `acknowledge()` finds no row to remove, and the row appears afterwards and waits for an ack that
+    // already came: measured as a `msg:queued` residue in 4 of 20 probe runs, attempts=1.
+    if (kind === 'msg') {
+      store.outbox.append({
+        id: envelope.id,
+        kind,
+        envelope,
+        attempts: 0,
+        queuedAt: new Date().toISOString(),
+        undelivered: false,
+      })
+    }
     const sent = transport.sendTo(to, envelope)
-    // Both a message and an ack are queued until they are *confirmed*: a message by its ack, an ack by
-    // nothing at all, so it is simply retried until the peer is heard from or the attempts run out.
-    //
-    // An ack used to be fire-and-forget. When the write landed in a socket that had already died the
-    // sender waited for it forever, and the message was delivered on both sides with the sender still
-    // holding it queued: 2 of 50 runs lost exactly that ack and nothing recorded it.
-    // An ack goes into the queue only when the write failed. A written ack has nothing left to prove -
-    // it has no acknowledgement of its own - and keeping it queued made `status.queued` show a message
-    // the peer already has, then sit there forever once the socket closed (5 of 6 probe runs).
-    if (kind === 'msg' || (kind === 'ack' && !sent)) {
+    if (kind === 'msg') {
+      // The row is already queued; record whether the first write landed so the retry ladder knows where
+      // it stands.
+      if (sent) bumpAttempts(store, envelope.id)
+    } else if (kind === 'ack' && !sent) {
+      // Only a failed write queues an ack: a written one has nothing left to prove, and queueing every ack
+      // left a phantom row in 19 of 20 probe runs because nothing confirms an ack of an ack.
       store.outbox.append({
         id: envelope.id,
         kind,

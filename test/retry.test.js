@@ -203,3 +203,39 @@ test('a queued ack is retried on the periodic flush when the socket recovers', {
     b.cleanup()
   }
 })
+
+test('a message queued before the peer was verified is retried once a socket exists', { timeout: TURN_MS }, async () => {
+  // The residue the probe reported in 4 of 20 runs: a message queued while `livePeers()` was still empty,
+  // then never retried because the flush required the peer to be live. `sendTo` already decides whether a
+  // socket exists, so the flush must not ask the question twice.
+  process.env.TEST_SECRET = `${SECRET}-preverify`
+  const a = fleet('pre-a')
+  const b = fleet('pre-b')
+  try {
+    trustEachOther(a, b)
+    await until(() => a.api.transport.livePeers().length > 0 && b.api.transport.livePeers().length > 0, { label: 'both connected' })
+
+    // Queue a message with no socket available, exactly like a first write that landed in a dying socket.
+    const peer = a.api.store.peers.byFingerprint(fingerprintOf(b.identity.publicKey))
+    const realSend = a.api.transport.sendTo
+    const realLive = a.api.transport.livePeers.bind(a.api.transport)
+    a.api.transport.sendTo = () => false
+    a.api.transport.livePeers = () => []
+    const sent = await a.tools.get('p2p_send').execute({ to: peer.fingerprint, text: 'queued before verify' })
+    assert.equal(sent.queued, true, 'it is queued while no write can succeed')
+    // The socket is usable again, but `livePeers()` still reports nothing - the state a message queued
+    // before verification sits in. Only a flush that does not re-ask that question can move it.
+    a.api.transport.sendTo = realSend
+    setTimeout(() => { a.api.transport.livePeers = realLive }, 25_000)
+
+    // No new envelope from B arrives; the periodic flush alone has to move the row.
+    await until(() => a.api.store.outbox.all().every((row) => row.id !== sent.messageId), {
+      label: 'the queued message is retried and acked',
+      timeout: 20_000,
+    })
+    await until(() => b.api.store.inbox.all().length === 1, { label: 'B receives it' })
+  } finally {
+    a.cleanup()
+    b.cleanup()
+  }
+})

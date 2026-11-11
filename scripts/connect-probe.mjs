@@ -74,9 +74,22 @@ try {
   out.gotMessage = got
   out.gotMs = got ? Date.now() - started : null
   out.wakes = wakes.length
-  const drained = await wait(() => api.store.outbox.size === 0, 5000)
+  // Wait longer than the retry ladder so a residue is a real loss, not an in-flight retry.
+  const drained = await wait(() => api.store.outbox.size === 0, 20000)
   out.ackedOutbox = drained ? 0 : api.store.outbox.size
-  if (!drained) out.outboxKinds = api.store.outbox.all().map((row) => row.kind + ':' + (row.undelivered === true ? 'undelivered' : 'queued'))
+  if (!drained) {
+    out.outboxKinds = api.store.outbox.all().map((row) => row.kind + ':' + (row.undelivered === true ? 'undelivered' : 'queued'))
+    out.outboxDetail = api.store.outbox.all().map((row) => ({
+      kind: row.kind,
+      attempts: row.attempts,
+      id: String(row.id).slice(0, 8),
+      to: String(row.envelope?.to).slice(0, 8),
+      // A queued row is a message this side sent; its proof of delivery is the peer's inbox, so report the
+      // ack count this side has seen instead of looking in its own inbox.
+      ackSeen: api.stats.acksReceived ?? null,
+      myStats: api.stats,
+    }))
+  }
 } catch (error) {
   out.error = String(error.message ?? error).slice(0, 120)
 }
@@ -143,8 +156,8 @@ async function oneRun(run) {
   const line = {
     run,
     bothWays,
-    a: { sent: byRole.a?.sentOk, got: byRole.a?.gotMessage, gotMs: byRole.a?.gotMs, wakes: byRole.a?.wakes, outbox: byRole.a?.ackedOutbox, kinds: byRole.a?.outboxKinds },
-    b: { sent: byRole.b?.sentOk, got: byRole.b?.gotMessage, gotMs: byRole.b?.gotMs, wakes: byRole.b?.wakes, outbox: byRole.b?.ackedOutbox, kinds: byRole.b?.outboxKinds },
+    a: { sent: byRole.a?.sentOk, got: byRole.a?.gotMessage, gotMs: byRole.a?.gotMs, wakes: byRole.a?.wakes, outbox: byRole.a?.ackedOutbox, kinds: byRole.a?.outboxKinds, detail: byRole.a?.outboxDetail },
+    b: { sent: byRole.b?.sentOk, got: byRole.b?.gotMessage, gotMs: byRole.b?.gotMs, wakes: byRole.b?.wakes, outbox: byRole.b?.ackedOutbox, kinds: byRole.b?.outboxKinds, detail: byRole.b?.outboxDetail },
   }
   console.log(JSON.stringify(line))
   rmSync(base, { recursive: true, force: true })
