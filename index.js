@@ -1,0 +1,429 @@
+/**
+ * dsh-p2p-bridge — encrypted peer-to-peer messaging between two DSH fleets.
+ *
+ * Four Host-level tools and nothing else in the agent's way: `p2p_status`, `p2p_peers`, `p2p_send`,
+ * `p2p_inbox`. The transport runs in the background on a hyperswarm topic derived from a fleet
+ * secret; an incoming message from a pinned peer is stored, then the owning session is woken with a
+ * short notice (see `lib/wake.js`).
+ *
+ * Fail-closed rules, all enforced here and in `lib/protocol.js`:
+ * - an unknown peer is `pending`, and a `pending` peer's messages are dropped, not queued;
+ * - `p2p_send` refuses a peer that is not `trusted`;
+ * - `to: "*"` is refused with "broadcast is v2";
+ * - the plugin never returns a key, only a fingerprint.
+ *
+ * `enabled` defaults to false: with no fleet secret nothing joins the DHT, and `p2p_status` says so.
+ */
+import { createRequire } from 'node:module'
+import { hostname } from 'node:os'
+
+import { defaultDir, fingerprint, loadIdentity, sign } from './lib/identity.js'
+import { openStore } from './lib/inbox.js'
+import { MAX_MESSAGE_BYTES, PROTOCOL_VERSION, seal, topicFor } from './lib/protocol.js'
+import { Transport } from './lib/transport.js'
+import { deliverWake } from './lib/wake.js'
+
+/** hyperswarm is CommonJS; this plugin stays ESM so the Host loader can import it. */
+const require = createRequire(import.meta.url)
+
+export const name = 'dsh-p2p-bridge'
+
+/** Host services this plugin consumes; the same shape `@local/dsh-monitor` asks for. */
+export const inject = ['tools', 'agents', 'systemPrompt']
+
+const DEFAULTS = {
+  enabled: false,
+  fleetSecretEnv: 'DSH_P2P_FLEET_SECRET',
+  autoStart: true,
+  maxMessageBytes: MAX_MESSAGE_BYTES,
+  wakeOnMessage: true,
+  wakeSummaryChars: 120,
+  retryAttempts: 3,
+  seenTtlHours: 24,
+  dir: undefined,
+}
+
+function errorText(error) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Reads the fleet secret from the environment variable the config names; '' when it is not set. */
+function readSecret(envName) {
+  const value = process.env[envName]
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+export function apply(ctx, rawConfig) {
+  const config = { ...DEFAULTS, ...(rawConfig ?? {}) }
+  const dir = config.dir ?? defaultDir()
+  const store = openStore({ dir, seenTtlHours: config.seenTtlHours })
+  const logger = ctx.logger?.('p2p-bridge')
+  const log = (what, detail) => {
+    try {
+      logger?.warn?.(`${what}${detail === undefined ? '' : `: ${typeof detail === 'string' ? detail : errorText(detail)}`}`)
+    } catch {
+      /* logging must never break delivery */
+    }
+  }
+
+  let identity
+  try {
+    identity = loadIdentity({ dir, label: hostname() })
+  } catch (error) {
+    // A broken identity file is a decision for the user (regenerating it breaks every peer pin), so the
+    // tools still register and every call reports the problem instead of the plugin failing to mount.
+    identity = undefined
+    log('identity unavailable', error)
+  }
+
+  const secret = readSecret(config.fleetSecretEnv)
+  const enabled = config.enabled === true && secret.length > 0 && identity !== undefined
+  const transport = new Transport({
+    topic: enabled ? topicFor(secret) : undefined,
+    identity,
+    swarmFactory: config.swarmFactory ?? (() => new (requireHyperswarm())()),
+    onEnvelope: (envelope) => handle(envelope),
+    onPeer: (publicKey) => flushOutbox(publicKey),
+    onConnect: (peer) => sendHello(peer),
+    onRejected: (error) => log('rejected envelope', error),
+    onLog: (what, detail) => log(`transport ${what}`, detail),
+    maxBytes: config.maxMessageBytes,
+  })
+  transport.useSeen(store.seen)
+
+  /** What happened to envelopes, for tests and diagnostics: arrival is distinct from delivery. */
+  const stats = { received: 0, delivered: 0, dropped: 0 }
+
+  /** Session the plugin wakes: the one that owns this Host row, or the configured one. */
+  const wakeSession = () => config.sessionId ?? ctx.session?.id
+
+  /**
+   * Delivery path for one verified envelope. Trust is checked before anything is written, so a
+   * pending peer leaves no trace in the inbox.
+   */
+  function handle(envelope) {
+    if (envelope.kind === 'msg') stats.received += 1
+    const sender = store.peers.observe({
+      publicKey: envelope.from,
+      fingerprint: fingerprint(envelope.from),
+      label: envelope.body?.label ?? '',
+    })
+    if (sender.status !== 'trusted') {
+      store.peers.save()
+      if (envelope.kind === 'msg') stats.dropped += 1
+      log('dropped message from untrusted peer', sender.fingerprint)
+      return
+    }
+    if (envelope.kind === 'ack') {
+      acknowledge(envelope)
+      return
+    }
+    if (envelope.kind === 'hello' || envelope.kind === 'ping' || envelope.kind === 'peers') return
+    if (envelope.kind !== 'msg') return
+    if (envelope.to === '*') {
+      stats.dropped += 1
+      log('dropped broadcast', 'broadcast is v2')
+      return
+    }
+    const row = {
+      id: envelope.id,
+      from: envelope.from,
+      fromLabel: sender.label,
+      fromFingerprint: sender.fingerprint,
+      ts: envelope.ts,
+      text: String(envelope.body?.text ?? ''),
+      read: false,
+      receivedAt: new Date().toISOString(),
+    }
+    store.inbox.append(row)
+    stats.delivered += 1
+    store.peers.save()
+    reply({ kind: 'ack', to: envelope.from, body: { replyTo: envelope.id } })
+    if (config.wakeOnMessage === true) {
+      const sessionId = wakeSession()
+      if (sessionId !== undefined) {
+        deliverWake(ctx, sessionId, {
+          label: sender.label,
+          fingerprint: sender.fingerprint,
+          text: row.text,
+          summaryChars: config.wakeSummaryChars,
+        })
+      }
+    }
+  }
+
+  /**
+   * The first thing every socket gets: our hello, so the other side learns our key and can address a
+   * reply. Without it a receiver never knows who is on the wire and `p2p_inbox` stays empty.
+   */
+  function sendHello(peer) {
+    if (identity === undefined) return
+    const hello = seal(identity, {
+      kind: 'hello',
+      to: '*',
+      body: { label: identity.label, agentName: config.agentName ?? 'dsh-p2p-bridge', protocol: PROTOCOL_VERSION },
+      sign,
+    })
+    transport.sendOn(peer, hello)
+  }
+
+  /**
+   * A peer just proved its key on a live socket: everything queued for it can go now.
+   *
+   * This is the other half of `reply()`. Without it a message queued while the peer was offline would
+   * sit in the outbox until the process restarted, which would make "queued" a lie.
+   */
+  function flushOutbox(publicKey) {
+    const rows = store.outbox.all()
+    const keep = []
+    let sent = 0
+    for (const row of rows) {
+      if (row.to === publicKey && transport.sendTo(publicKey, row)) sent += 1
+      else keep.push(row)
+    }
+    if (sent > 0) {
+      store.outbox.clear()
+      for (const row of keep) store.outbox.append(row)
+      log('outbox flushed', `${sent} message(s) to ${fingerprint(publicKey)}`)
+    }
+  }
+
+  /** An ack removes the matching outbox entry, which is the only way a queued message leaves it. */
+  function acknowledge(envelope) {
+    const replyTo = envelope.body?.replyTo
+    if (typeof replyTo !== 'string') return
+    const rows = store.outbox.all()
+    const kept = rows.filter((row) => row.id !== replyTo)
+    if (kept.length !== rows.length) {
+      store.outbox.clear()
+      for (const row of kept) store.outbox.append(row)
+    }
+  }
+
+  /** Signs and sends one envelope; `queued` means no live socket took it. */
+  function reply({ kind, to, body }) {
+    if (identity === undefined) throw new Error('no identity: cannot sign a message')
+    const envelope = seal(identity, { kind, to, body, sign })
+    const sent = transport.sendTo(to, envelope)
+    // Store the envelope exactly as signed. Metadata added here would change the signed bytes, and the
+    // receiver would reject a flushed message as a forged one.
+    if (!sent) store.outbox.append(envelope)
+    return { envelope, sent }
+  }
+
+  function status() {
+    return {
+      enabled,
+      publicKey: identity?.publicKey ?? null,
+      fingerprint: identity?.fingerprint ?? null,
+      topicPeers: transport.peerCount,
+      trustedPeers: store.peers.list().filter((peer) => peer.status === 'trusted').length,
+      unread: store.inbox.recent({ limit: Number.MAX_SAFE_INTEGER, unreadOnly: true }).length,
+      listening: transport.listening,
+      ...(identity === undefined ? { error: 'identity file is unreadable or malformed' } : {}),
+      ...(enabled ? {} : { reason: secret.length === 0 ? `no fleet secret in $${config.fleetSecretEnv}` : 'disabled in config' }),
+    }
+  }
+
+  const statusTool = {
+    name: 'p2p_status',
+    description:
+      'State of the peer-to-peer bridge: whether it is enabled, this fleet\'s public fingerprint, how many peers are connected and trusted, and how many messages are unread. Returns fingerprints, never keys.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          enabled: { type: 'boolean' },
+          publicKey: { type: ['string', 'null'] },
+          fingerprint: { type: ['string', 'null'] },
+          topicPeers: { type: 'number' },
+          trustedPeers: { type: 'number' },
+          unread: { type: 'number' },
+          listening: { type: 'boolean' },
+          reason: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['enabled', 'topicPeers', 'trustedPeers', 'unread', 'listening'],
+      },
+      render(_args, value) {
+        if (value.enabled !== true) {
+          return [{ type: 'text', text: `p2p bridge disabled (${value.reason ?? 'not configured'})` }]
+        }
+        return [{
+          type: 'text',
+          text: `p2p enabled as ${value.fingerprint} — ${value.topicPeers} peer(s) connected, ${value.trustedPeers} trusted, ${value.unread} unread`,
+        }]
+      },
+    },
+    async execute() {
+      return status()
+    },
+  }
+
+  const peersTool = {
+    name: 'p2p_peers',
+    description:
+      'Peers this fleet has seen: their fingerprint, label and status. A peer is `pending` until a person trusts it; only a trusted peer\'s messages are delivered.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          peers: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                publicKey: { type: 'string' },
+                fingerprint: { type: 'string' },
+                label: { type: 'string' },
+                status: { type: 'string', enum: ['pending', 'trusted'] },
+                lastSeen: { type: 'string' },
+              },
+              required: ['publicKey', 'fingerprint', 'label', 'status', 'lastSeen'],
+            },
+          },
+        },
+        required: ['peers'],
+      },
+      render(_args, value) {
+        if (value.peers.length === 0) return [{ type: 'text', text: 'no peers seen yet' }]
+        const lines = value.peers.map((peer) => `${peer.fingerprint} ${peer.status} ${peer.label || '(no label)'} last seen ${peer.lastSeen}`)
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute() {
+      return { peers: store.peers.list() }
+    },
+  }
+
+  const sendTool = {
+    name: 'p2p_send',
+    description:
+      'Send a short text message to a trusted peer, addressed by fingerprint. Fails for an untrusted peer and for broadcast ("*"), which is not in v1. The message is signed with this fleet\'s key and retried; if no socket takes it, it waits in the outbox.',
+    parameters: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Fingerprint of a trusted peer (16 hex characters). "*" is refused: broadcast is v2.' },
+        text: { type: 'string', description: 'Message body, plain text, at most 64 KB.' },
+      },
+      required: ['to', 'text'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          messageId: { type: 'string' },
+          queued: { type: 'boolean' },
+          sent: { type: 'boolean' },
+          peerStatus: { type: 'string' },
+        },
+        required: ['messageId', 'queued', 'sent', 'peerStatus'],
+      },
+      render(_args, value) {
+        return [{ type: 'text', text: value.sent ? `sent ${value.messageId}` : `queued ${value.messageId} (peer offline)` }]
+      },
+    },
+    async execute(rawArgs) {
+      const to = String(rawArgs?.to ?? '').trim()
+      const text = String(rawArgs?.text ?? '')
+      if (to === '*') throw new Error('broadcast is v2: p2p_send needs one trusted peer fingerprint')
+      if (to.length === 0) throw new Error('p2p_send needs a peer fingerprint')
+      if (text.length === 0) throw new Error('p2p_send needs some text')
+      if (Buffer.byteLength(text, 'utf8') > config.maxMessageBytes) {
+        throw new Error(`message is over the ${config.maxMessageBytes}-byte cap`)
+      }
+      if (identity === undefined) throw new Error('no identity: the bridge cannot sign a message')
+      const peer = store.peers.byFingerprint(to)
+      if (peer === undefined) throw new Error(`unknown peer ${to}: no such fingerprint in peers.json`)
+      if (peer.status !== 'trusted') throw new Error(`peer not trusted: run p2p_trust <fingerprint>`)
+      const { envelope, sent } = reply({ kind: 'msg', to: peer.publicKey, body: { text, replyTo: null, label: identity.label } })
+      return { messageId: envelope.id, queued: !sent, sent, peerStatus: peer.status }
+    },
+  }
+
+  const inboxTool = {
+    name: 'p2p_inbox',
+    description:
+      'Messages delivered by trusted peers, newest last. The wake notice carries only a preview; the full text is here. `markRead` flips the unread flag on the returned rows.',
+    parameters: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'How many of the newest messages to return (default 20).' },
+        markRead: { type: 'boolean', description: 'Mark the returned messages as read (default false).' },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          messages: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                from: { type: 'string' },
+                fromLabel: { type: 'string' },
+                ts: { type: 'string' },
+                text: { type: 'string' },
+                read: { type: 'boolean' },
+              },
+              required: ['id', 'from', 'fromLabel', 'ts', 'text', 'read'],
+            },
+          },
+        },
+        required: ['messages'],
+      },
+      render(_args, value) {
+        if (value.messages.length === 0) return [{ type: 'text', text: 'no messages' }]
+        return [{
+          type: 'text',
+          text: value.messages.map((row) => `${row.read ? ' ' : '•'} ${row.ts} ${row.fromLabel || row.from.slice(0, 12)}: ${row.text.slice(0, 200)}`).join('\n'),
+        }]
+      },
+    },
+    async execute(rawArgs) {
+      const limit = Number.isFinite(rawArgs?.limit) ? Math.max(1, Math.min(200, Number(rawArgs.limit))) : 20
+      const rows = store.inbox.recent({ limit })
+      if (rawArgs?.markRead === true) {
+        store.inbox.markRead(rows.map((row) => row.id))
+        return { messages: rows.map((row) => ({ ...row, read: true })) }
+      }
+      return { messages: rows }
+    },
+  }
+
+  ctx.tools.register(statusTool)
+  ctx.tools.register(peersTool)
+  ctx.tools.register(sendTool)
+  ctx.tools.register(inboxTool)
+
+  ctx.systemPrompt.section({
+    name: 'tool:p2p-bridge',
+    order: ctx.systemPrompt.getSectionOrder('TOOL_JOBS') + 1,
+    text:
+      'p2p_status, p2p_peers, p2p_send and p2p_inbox connect this fleet to another DeepSeek Harness fleet over an encrypted peer-to-peer link: '
+      + 'use p2p_peers to see which peers are trusted, p2p_send to message one by fingerprint, and p2p_inbox to read what arrived — '
+      + 'a [P2P] wake notice carries only a preview, so open the inbox before answering. Messages never reach an unknown peer: '
+      + 'an unapproved fingerprint stays pending and its traffic is dropped, never queued.',
+  })
+
+  if (enabled && config.autoStart === true) {
+    transport.start()
+  }
+
+  // A Host row outlives turns; the sockets and the timer ladder do not outlive the plugin.
+  ctx.effect(() => () => {
+    void transport.stop()
+  }, 'p2p-bridge.transport()')
+
+  return { store, transport, identity, enabled, stats }
+}
+
+function requireHyperswarm() {
+  return require('hyperswarm')
+}
