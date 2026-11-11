@@ -563,7 +563,7 @@ export function apply(ctx, rawConfig) {
     void transport.stop()
   }, 'p2p-bridge.transport()')
 
-  return { store, transport, identity, enabled, stats, flushOutbox, retryPass }
+  return { store, transport, identity, enabled, stats, flushOutbox, retryPass, flushWrites: () => transport.flushWrites() }
 }
 
 function requireHyperswarm() {

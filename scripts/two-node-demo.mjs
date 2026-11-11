@@ -89,11 +89,39 @@ try {
       wakeSourceKind: wakes[0]?.source?.kind,
       stats: api.stats,
     }))
+    // Do not exit with an unflushed ack in the socket buffer: that is how a delivered message looks
+    // undelivered to the sender.
+    await api.flushWrites(5000)
   }
 } catch (error) {
   // A failed wait must not look like a clean exit: print why, and exit non-zero.
-  const outbox = api.store.outbox.all().map((row) => ({ id: row.id?.slice(0, 8), attempts: row.attempts, undelivered: row.undelivered, to: String(row.envelope?.to).slice(0, 8) }))
-  console.log(JSON.stringify({ event: 'error', role, message: error.message, stats: api.stats, wakes: wakes.length, outboxStates: outbox, livePeers: api.transport.livePeers().length }))
+  const outbox = api.store.outbox.all().map((row) => ({
+    id: String(row.id).slice(0, 8),
+    kind: row.kind,
+    attempts: row.attempts,
+    undelivered: row.undelivered === true,
+    to: String(row.envelope?.to).slice(0, 8),
+    queuedAt: row.queuedAt,
+  }))
+  const sockets = [...api.transport.connections.values()].map((peer) => ({
+    hex: String(peer.hex).slice(0, 8),
+    verified: peer.publicKey !== undefined,
+    destroyed: peer.socket?.destroyed === true,
+    writable: peer.socket?.writable !== false,
+    ageMs: peer.createdAt === undefined ? null : Date.now() - peer.createdAt,
+  }))
+  console.log(JSON.stringify({
+    event: 'error',
+    role,
+    message: error.message,
+    stats: api.stats,
+    wakes: wakes.length,
+    outboxStates: outbox,
+    livePeers: api.transport.livePeers().length,
+    sockets,
+    listening: api.transport.listening,
+    peerCount: api.transport.peerCount,
+  }))
   await api.transport.stop()
   process.exit(1)
 }
@@ -161,7 +189,7 @@ const report = {
   homes: Object.fromEntries(Object.entries(homes).map(([role, h]) => [role, { home: h.home, fingerprint: h.identity.fingerprint }])),
   sender: sender.events,
   receiver: receiver.events,
-  exitCodes: { sender: codes[0], receiver: codes[1] },
+  exitCodes: { receiver: codes[0], sender: codes[1] },
   stderr: [...sender.errors, ...receiver.errors].filter((line) => line.trim().length > 0).slice(0, 6),
 }
 console.log(JSON.stringify(report, null, 2))
