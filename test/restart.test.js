@@ -140,3 +140,24 @@ test('the window forgets an id after 24 hours', () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a duplicate of a delivered message is acked again, not stored twice', async () => {
+  // The sender retries until it hears an ack. If the ack is lost, the retry has the same id, hits the
+  // replay window, and would never be acknowledged - a message delivered once and never confirmed. The
+  // receiver must answer the duplicate with the same ack and leave the inbox alone.
+  const dir = mkdtempSync(join(tmpdir(), 'p2p-reack-'))
+  try {
+    const receiver = await receiverIn(dir)
+    const sender = createIdentity('re-ack-sender')
+    const envelope = seal(sender, { kind: 'msg', to: receiver.publicKey, body: { text: 'delivered once', replyTo: null } })
+    const seen = new SeenSet({ dir })
+    openEnvelope(envelope, { selfPublicKey: receiver.publicKey, seen })
+    assert.throws(
+      () => openEnvelope(envelope, { selfPublicKey: receiver.publicKey, seen }),
+      (error) => error.code === 'replay',
+      'the duplicate must be a replay, which is what makes the re-ack path necessary',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

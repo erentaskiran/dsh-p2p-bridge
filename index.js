@@ -94,6 +94,7 @@ export function apply(ctx, rawConfig) {
     swarmFactory: config.swarmFactory ?? (() => new (requireHyperswarm())()),
     onEnvelope: (envelope) => handle(envelope),
     onPeer: (publicKey) => flushOutbox(publicKey),
+    onReplay: (envelope) => reacknowledge(envelope),
     onConnect: (peer) => sendHello(peer),
     onRejected: (error) => log('rejected envelope', error),
     onLog: (what, detail) => log(`transport ${what}`, detail),
@@ -221,6 +222,19 @@ export function apply(ctx, rawConfig) {
       }
     }, 2000)
     retryTimer.unref?.()
+  }
+
+  /**
+   * A duplicate of a message we already delivered gets its ack again, and nothing else.
+   *
+   * The sender retries until it hears an ack, so the same id arriving twice is normal, not an attack. The
+   * message is not stored twice and the agent is not woken twice; only the ack is repeated.
+   */
+  function reacknowledge(envelope) {
+    if (envelope?.kind !== 'msg' || typeof envelope.id !== 'string') return
+    if (envelope.to === '*' || envelope.to !== identity?.publicKey) return
+    if (!store.inbox.all().some((row) => row.id === envelope.id)) return
+    reply({ kind: 'ack', to: envelope.from, body: { replyTo: envelope.id } })
   }
 
   /** An ack removes the matching outbox entry, which is the only way a queued message leaves it. */

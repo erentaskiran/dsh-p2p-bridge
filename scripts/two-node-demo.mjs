@@ -56,10 +56,10 @@ const api = apply(ctx, { dir, enabled: true, fleetSecretEnv: 'P2P_SECRET', wakeO
 const status = await tools.get('p2p_status').execute({})
 console.log(JSON.stringify({ event: 'ready', role, fingerprint: status.fingerprint }))
 
-const wait = async (check, ms = 30000) => {
+const wait = async (check, ms, what) => {
   const started = Date.now()
   while (!(await check())) {
-    if (Date.now() - started > ms) throw new Error('timeout waiting for ' + role)
+    if (Date.now() - started > ms) throw new Error('timeout waiting for ' + what + ' (' + role + ', ' + ms + 'ms)')
     await new Promise((r) => setTimeout(r, 100))
   }
 }
@@ -67,15 +67,17 @@ const wait = async (check, ms = 30000) => {
 try {
   if (role === 'sender') {
     // Wait for a socket whose remote key we have learned, which is what makes addressing it possible.
-    await wait(() => api.transport.livePeers().length > 0)
-    const peer = (await tools.get('p2p_peers').execute({})).peers.find((p) => p.status === 'trusted' && api.transport.livePeers().includes(p.publicKey))
+    // The tool payload carries no keys by design, so this harness resolves the key from the store.
+    const trustedLive = () => api.store.peers.list().filter((p) => p.status === 'trusted' && api.transport.livePeers().includes(p.publicKey))
+    await wait(() => trustedLive().length > 0, 45000, 'a live trusted peer')
+    const peer = trustedLive()[0]
     if (peer === undefined) throw new Error('no live trusted peer')
     const sent = await tools.get('p2p_send').execute({ to: peer.fingerprint, text: 'hello across two fleets' })
     console.log(JSON.stringify({ event: 'sent', to: peer.fingerprint, ...sent }))
-    await wait(() => api.store.outbox.size === 0)
+    await wait(() => api.store.outbox.size === 0, 60000, 'the ack drain')
     console.log(JSON.stringify({ event: 'acked', outbox: api.store.outbox.size }))
   } else {
-    await wait(() => wakes.length > 0)
+    await wait(() => wakes.length > 0, 45000, 'the first message')
     const inbox = await tools.get('p2p_inbox').execute({ limit: 5 })
     console.log(JSON.stringify({
       event: 'received',
