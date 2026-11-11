@@ -74,7 +74,9 @@ try {
     if (peer === undefined) throw new Error('no live trusted peer')
     const sent = await tools.get('p2p_send').execute({ to: peer.fingerprint, text: 'hello across two fleets' })
     console.log(JSON.stringify({ event: 'sent', to: peer.fingerprint, ...sent }))
-    await wait(() => api.store.outbox.size === 0, 60000, 'the ack drain')
+    // An ack that was lost is retried on the refresh ladder, which can take a DHT round trip; give the
+    // ladder room to finish rather than declaring failure while the queue is still making progress.
+    await wait(() => api.store.outbox.size === 0, 90000, 'the ack drain')
     console.log(JSON.stringify({ event: 'acked', outbox: api.store.outbox.size }))
   } else {
     await wait(() => wakes.length > 0, 45000, 'the first message')
