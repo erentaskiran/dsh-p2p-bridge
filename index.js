@@ -39,6 +39,7 @@ const DEFAULTS = {
   wakeOnMessage: true,
   wakeSummaryChars: 120,
   retryAttempts: 3,
+  flushIntervalMs: 2000,
   seenTtlHours: 24,
   dir: undefined,
 }
@@ -206,11 +207,15 @@ export function apply(ctx, rawConfig) {
     const keep = []
     for (const row of rows) {
       const target = row.envelope?.to
+      if (publicKey !== undefined && target !== publicKey) {
+        keep.push(row)
+        continue
+      }
       const attempts = Number(row.attempts ?? 0)
       // `sendTo` decides whether a socket exists; requiring `livePeers` here skipped rows queued in the
       // window before the peer was verified, which is exactly when the first write was lost.
-      if (target === publicKey && attempts < config.retryAttempts + 1 && !row.undelivered) {
-        if (transport.sendTo(publicKey, row.envelope)) {
+      if (target !== undefined && attempts < config.retryAttempts + 1 && !row.undelivered) {
+        if (target !== undefined && transport.sendTo(target, row.envelope)) {
           // An ack has no acknowledgement of its own, so a successful write is as confirmed as it ever
           // gets: keeping it would leave the queue non-empty forever and make "drained" unreachable. If
           // this ack was the one that got lost, the peer retries the message, hits the replay rule and
@@ -227,22 +232,28 @@ export function apply(ctx, rawConfig) {
     for (const row of keep) store.outbox.append(row)
   }
 
-  /** Re-sends the queue on a timer; a live socket is rare to lose and cheap to retry while it exists. */
+  /**
+   * One pass of the retry ladder: flush what can go, then give up on what has used its attempts.
+   *
+   * The timer and `retry()` both call this, so a test exercises the real ladder rather than a copy of it.
+   */
+  function retryPass() {
+    for (const row of store.outbox.all()) {
+      if (row.undelivered === true) continue
+      if (Number(row.attempts ?? 0) > config.retryAttempts) {
+        const rows = store.outbox.all().map((item) => (item.id === row.id ? { ...item, undelivered: true } : item))
+        store.outbox.clear()
+        for (const item of rows) store.outbox.append(item)
+        log('message undelivered', row.id)
+      }
+    }
+    flushOutbox()
+  }
+
   let retryTimer
   function startRetries() {
     if (retryTimer !== undefined) return
-    retryTimer = setInterval(() => {
-      for (const publicKey of transport.livePeers()) flushOutbox(publicKey)
-      for (const row of store.outbox.all()) {
-        if (row.undelivered) continue
-        if (Number(row.attempts ?? 0) > config.retryAttempts) {
-          const rows = store.outbox.all().map((item) => (item.id === row.id ? { ...item, undelivered: true } : item))
-          store.outbox.clear()
-          for (const item of rows) store.outbox.append(item)
-          log('message undelivered', row.id)
-        }
-      }
-    }, 2000)
+    retryTimer = setInterval(() => retryPass(), config.flushIntervalMs)
     retryTimer.unref?.()
   }
 
@@ -552,7 +563,7 @@ export function apply(ctx, rawConfig) {
     void transport.stop()
   }, 'p2p-bridge.transport()')
 
-  return { store, transport, identity, enabled, stats }
+  return { store, transport, identity, enabled, stats, flushOutbox, retryPass }
 }
 
 function requireHyperswarm() {
