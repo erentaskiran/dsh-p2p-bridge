@@ -183,3 +183,42 @@ safe before the friend is involved.
 
 Broadcast, file transfer, group rooms, relay-only mode for symmetric NATs, desktop UI. Each is a
 follow-up with its own decision.
+
+## Known observations
+
+Facts measured on this machine that did not become bugs, recorded so a later reader does not
+rediscover them from scratch.
+
+- **A single run of the test suite once reported `26 pass / 2 fail`** (on `f2b2ed4`, while committing:
+  the assertion output was not captured). It has not repeated in 70 consecutive TAP runs
+  (`/tmp/tap-dcc41df/`, 20 runs on `dcc41df`; `/tmp/tap-4a9c9b1/`, 50 runs on `4a9c9b1`), all with zero
+  `not ok` lines. The failure is unexplained, not absent: treat any red run as real evidence until the
+  failing test is named, and do not average it away.
+- **`livePeers()` is not a delivery metric.** The first connection probe asked whether each side's
+  `livePeers()` listed the other and reported `bothSaw: 0/50` while messages were crossing normally.
+  Both peers dial at once, hyperswarm keeps one socket per side, and the two sides can keep different
+  halves, so a side can hold a verified peer that its own peer list does not contain. The probe now asks
+  whether a message crossed in **both** directions (`/tmp/p2p-twoway-50-22b7ef6.txt` → 50/50).
+- **A process that exits right after `write()` drops the bytes.** `write()` only buffers; an ack written
+  and followed by `process.exit` never reaches the peer. Two of fifty demo runs failed exactly that way
+  (`/tmp/p2p-witness-dcc41df/fail-4.txt`, `fail-11.txt`: receiver `delivered: 1`, sender
+  `acksReceived: 0`, no socket). `transport.flushWrites()` exists for that, and a graceful shutdown
+  must await it.
+
+## v1 acceptance criteria
+
+Each line names the artefact that shows it. A criterion without a file is a claim, not a result.
+
+| Criterion | Evidence |
+|---|---|
+| Test A — 50 messages over one established connection, each delivered once, acked, one wake | `/tmp/p2p-steady50-7cfb832.txt` → `TOTAL 50 PASS / 0 FAIL of 50` (50 runs × 50 messages) |
+| Test B — 50 fresh pairs, a message crossing in **both** directions each time | `/tmp/p2p-twoway-50-4a9c9b1.txt` → `runs 50 / bothWays 50 / oneWay 0 / neither 0`, median 3970 ms, p95 4497, max 4870 |
+| Two-process demo — 50 consecutive runs | `/tmp/p2p-flake50-4a9c9b1.txt` → `TOTAL 50 PASS / 0 FAIL of 50`, zero witness files |
+| Suite green, repeated | `npm test` → 35 passing; `/tmp/tap-4a9c9b1/` 50 TAP runs, zero `not ok` |
+| Negative controls: removing the guard turns the suite red | all seven measured red on `4a9c9b1`: signature 34/1, trust gate 34/1, `seen.save()` 34/1, `acknowledge()` 30/5, flush call 34/1, `dropStaleSockets()` 34/1, `pingQuietPeers()` 34/1; restored run 35/0 |
+| No key leaves the plugin | `p2p_status`/`p2p_peers` carry fingerprints only; `test/` asserts the payload shape |
+| Replay window survives a restart | `test/restart.test.js`, two processes |
+| `undelivered` is counted, never silent | `test/flush.test.js`, and `p2p_status.queued` / `undelivered` |
+
+Not in this table on purpose: "works on two real machines over the internet". That is the manual step in
+the test plan and it has not been run; it stays open until somebody runs it and records the transcript.
