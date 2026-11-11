@@ -195,11 +195,19 @@ rediscover them from scratch.
   again" and "a duplicate of a message that was never delivered is not acked" - each failing with
   `timed out waiting for both connected after 20000ms`. The retry logic was fine; two swarms had not
   found each other inside 20 s while the suite ran several pairs at once. The connection waits are 60 s
-  now, since connection setup is the DHT's timing and the two-process probe measures it separately.
+  now, and each test's own timeout is 180 s, because a test whose timeout equals its wait budget dies at
+  the same instant the wait would have succeeded. Verified afterwards: `/tmp/tap-final-220588d/`, 50
+  suite runs, all `tests 39 / pass 39 / fail 0`.
 - **One more failure, seen once and not explained:** `/tmp/tap-dd09ea0/run-1.log` →
   `AssertionError: the flush kept retrying (wrote 0 time(s))` in `test/flush.test.js`. It did not repeat
-  in 15 isolated runs or 4 full-suite runs afterwards. The assertion now prints a per-round trace so the
-  next occurrence is diagnosable; the cause is unknown and is not guessed at here.
+  in 15 isolated runs, 4 full-suite runs, 20 serial suite runs (`/tmp/serial/`, all zero failures), 200
+  fresh instances in `test/flush-stress.test.js`, or any of the 50 runs in `/tmp/tap-final-220588d/`.
+  The assertion prints a per-round trace so the next occurrence is diagnosable; the cause is unknown and
+  is not guessed at here.
+- **A promised test that did not exist.** The acceptance table named `test/` as evidence for "no key
+  leaves the plugin" while the suite had no such test, and `p2p_inbox` was in fact returning the sender's
+  public key. Both fixed (`test/status.test.js`, `publicMessage` in `index.js`), but the lesson stays: a
+  table row is a claim until the file it names exists.
 - **`livePeers()` is not a delivery metric.** The first connection probe asked whether each side's
   `livePeers()` listed the other and reported `bothSaw: 0/50` while messages were crossing normally.
   Both peers dial at once, hyperswarm keeps one socket per side, and the two sides can keep different
@@ -220,9 +228,9 @@ Each line names the artefact that shows it. A criterion without a file is a clai
 | Test A — 50 messages over one established connection, each delivered once, acked, one wake | `/tmp/p2p-steady50-7cfb832.txt` → `TOTAL 50 PASS / 0 FAIL of 50` (50 runs × 50 messages) |
 | Test B — 50 fresh pairs, a message crossing in **both** directions each time, with no message left queued | `/tmp/p2p-twoway-50-flushed.txt` → `runs 50 / bothWays 50 / oneWay 0 / neither 0`, median 3946 ms, p95 4352, max 4572; `outbox:0` on all 100 side-reports, zero residue |
 | Two-process demo — 50 consecutive runs | `/tmp/p2p-flake50-4a9c9b1.txt` → `TOTAL 50 PASS / 0 FAIL of 50`, zero witness files |
-| Suite green, repeated | `npm test` → 35 passing; `/tmp/tap-30cb70b-50/` 50 runs, 49 green, the one red run explained and fixed by the 60 s connection budget (see Known observations) |
+| Suite green, repeated | `/tmp/tap-final-220588d/` → 50 runs, every log `tests 39 / pass 39 / fail 0`, zero zero-test logs |
 | Negative controls: removing the guard turns the suite red | all seven measured red on `4a9c9b1`: signature 34/1, trust gate 34/1, `seen.save()` 34/1, `acknowledge()` 30/5, flush call 34/1, `dropStaleSockets()` 34/1, `pingQuietPeers()` 34/1; restored run 35/0 |
-| No key leaves the plugin | `p2p_status`/`p2p_peers` carry fingerprints only; `test/` asserts the payload shape |
+| No key leaves the plugin | `test/status.test.js` asserts the payload shape of `p2p_status`, `p2p_peers` and `p2p_inbox`; re-adding `publicKey` turns it red |
 | Replay window survives a restart | `test/restart.test.js`, two processes |
 | `undelivered` is counted, never silent | `test/flush.test.js`, and `p2p_status.queued` / `undelivered` |
 
