@@ -1,0 +1,25 @@
+# dsh-p2p-bridge: encrypted peer-to-peer messaging between two DSH fleets.
+#
+# One Host row registers four global tools:
+#   - p2p_status  connection + identity state
+#   - p2p_peers   trusted and pending peers
+#   - p2p_send    send a message to a trusted peer
+#   - p2p_inbox   read delivered messages
+#
+# Mounted at Host level so every session sees the tools whatever preset it selects,
+# the same placement `@local/dsh-monitor` uses.
+#
+# enabled: false by default — the plugin installs and answers p2p_status, but joins
+# no DHT topic until a fleet secret exists in the environment.
+- insert:
+    - id: p2p-bridge
+      name: 'dsh-p2p-bridge'
+      config:
+        enabled: false
+        fleetSecretEnv: DSH_P2P_FLEET_SECRET
+        autoStart: true
+        maxMessageBytes: 65536
+        wakeOnMessage: true
+        wakeSummaryChars: 120
+        retryAttempts: 3
+        seenTtlHours: 24

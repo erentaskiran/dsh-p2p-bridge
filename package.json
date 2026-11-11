@@ -1,0 +1,25 @@
+{
+  "name": "dsh-p2p-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "P2P bridge for DeepSeek Harness: encrypted peer-to-peer messaging between bots on two separate DSH fleets.",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  },
+  "dependencies": {
+    "hyperswarm": "^4.9.0"
+  }
+}
