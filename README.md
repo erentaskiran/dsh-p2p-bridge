@@ -100,11 +100,15 @@ npm test
 
 `npm test` runs `node --test 'test/*.test.js'`. Pass the **glob**, not the directory: on Node 24
 `node --test test/` resolves `test` as a module path and fails with `Cannot find module '.../test'`,
-so either use the glob or name the two files:
+so either use the glob or name the files:
 
 ```bash
-node --test test/protocol.test.js test/e2e.test.js
+node --test test/protocol.test.js test/e2e.test.js test/restart.test.js
 ```
+
+The suite is 22 tests; four of them are negative controls that must fail when the guard they cover is
+removed (signature check, trust gate, ack handling, replay persistence). Removing a guard and watching
+the suite stay green means the guard is untested, not that it is unnecessary.
 
 What the suites cover:
 
@@ -121,7 +125,8 @@ Two fleets in two **separate processes**, each with its own `DSH_HOME` and state
 a script rather than a test, because it spawns children:
 
 ```bash
-node scripts/two-node-demo.mjs          # prints a JSON report and "TWO-NODE E2E: PASS"
+node scripts/two-node-demo.mjs                     # prints a JSON report and "TWO-NODE E2E: PASS"
+P2P_REJECT_SENDER=1 node scripts/two-node-demo.mjs # negative control: receiver withholds trust
 ```
 
 ## Storage
@@ -139,7 +144,22 @@ node scripts/two-node-demo.mjs          # prints a JSON report and "TWO-NODE E2E
 Append-only JSONL rather than a database: this is tens of messages a day, and a file you can open is
 worth more than a schema.
 
+## What it does not do
+
+Stated here so nobody discovers it at the worst moment:
+
+- **No broadcast.** `to: "*"` is refused with "broadcast is v2". One message, one trusted peer.
+- **No file transfer.** Text only, and 64 KB is the whole budget per message. There is no attachment
+  path, no chunking and no resume.
+- **No group rooms.** Two fleets, point to point. A third machine is a third pairing.
+- **No relay mode.** Two peers behind symmetric NATs that cannot hole-punch will not connect; v1 has
+  no fallback, so both sides need a network where UDP hole punching works.
+- **No desktop UI.** The surface is the four tools, `bin/p2p-trust.js`, and the jsonl files.
+- **No auto-trust.** A new peer stays `pending` until a person approves its fingerprint; nothing in
+  the plugin upgrades it.
+- **It is not a way to share a model or a session.** Each fleet's agents stay in their own sessions;
+  what crosses the wire is a short signed text message.
+
 ## Status
 
-v1, as designed in [SPEC.md](SPEC.md). Out of scope: broadcast, file transfer, group rooms,
-relay-only mode for symmetric NATs, desktop UI.
+v1, as designed in [SPEC.md](SPEC.md).

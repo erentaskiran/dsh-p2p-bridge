@@ -279,7 +279,12 @@ export function apply(ctx, rawConfig) {
       topicPeers: transport.peerCount,
       trustedPeers: store.peers.list().filter((peer) => peer.status === 'trusted').length,
       unread: store.inbox.recent({ limit: Number.MAX_SAFE_INTEGER, unreadOnly: true }).length,
+      // A queued or given-up message is visible in the status: silence is how a lost message stays lost.
+      queued: store.outbox.all().filter((row) => row.undelivered !== true).length,
+      undelivered: store.outbox.all().filter((row) => row.undelivered === true).length,
       listening: transport.listening,
+      // A failed replay write degrades the window to memory: say so instead of pretending it is durable.
+      ...(store.seen.lastSaveError === undefined ? {} : { replayWarning: `replay window not persisted: ${store.seen.lastSaveError}` }),
       ...(identity === undefined ? { error: 'identity file is unreadable or malformed' } : {}),
       ...(enabled ? {} : { reason: secret.length === 0 ? `no fleet secret in $${config.fleetSecretEnv}` : 'disabled in config' }),
     }
@@ -299,11 +304,14 @@ export function apply(ctx, rawConfig) {
           topicPeers: { type: 'number' },
           trustedPeers: { type: 'number' },
           unread: { type: 'number' },
+          queued: { type: 'number' },
+          undelivered: { type: 'number' },
           listening: { type: 'boolean' },
           reason: { type: 'string' },
           error: { type: 'string' },
+          replayWarning: { type: 'string' },
         },
-        required: ['enabled', 'topicPeers', 'trustedPeers', 'unread', 'listening'],
+        required: ['enabled', 'topicPeers', 'trustedPeers', 'unread', 'queued', 'undelivered', 'listening'],
       },
       render(_args, value) {
         if (value.enabled !== true) {
@@ -311,7 +319,7 @@ export function apply(ctx, rawConfig) {
         }
         return [{
           type: 'text',
-          text: `p2p enabled as ${value.fingerprint} — ${value.topicPeers} peer(s) connected, ${value.trustedPeers} trusted, ${value.unread} unread`,
+          text: `p2p enabled as ${value.fingerprint} — ${value.topicPeers} peer(s) connected, ${value.trustedPeers} trusted, ${value.unread} unread, ${value.queued} queued, ${value.undelivered} undelivered`,
         }]
       },
     },
