@@ -54,6 +54,17 @@ function publicPeer(peer) {
   return { fingerprint: peer.fingerprint, label: peer.label, status: peer.status, lastSeen: peer.lastSeen }
 }
 
+/**
+ * The model-facing shape of an inbox row.
+ *
+ * A stored row keeps `from` (the sender's public key) because the transport needs it to answer; a tool
+ * result does not, because a tool result lands in the transcript. `fromLabel` and the timestamp are what a
+ * reader actually uses.
+ */
+function publicMessage(row) {
+  return { id: row.id, fromLabel: row.fromLabel, ts: row.ts, text: row.text, read: row.read === true }
+}
+
 function errorText(error) {
   return error instanceof Error ? error.message : String(error)
 }
@@ -506,13 +517,12 @@ export function apply(ctx, rawConfig) {
               type: 'object',
               properties: {
                 id: { type: 'string' },
-                from: { type: 'string' },
                 fromLabel: { type: 'string' },
                 ts: { type: 'string' },
                 text: { type: 'string' },
                 read: { type: 'boolean' },
               },
-              required: ['id', 'from', 'fromLabel', 'ts', 'text', 'read'],
+              required: ['id', 'fromLabel', 'ts', 'text', 'read'],
             },
           },
         },
@@ -531,9 +541,9 @@ export function apply(ctx, rawConfig) {
       const rows = store.inbox.recent({ limit })
       if (rawArgs?.markRead === true) {
         store.inbox.markRead(rows.map((row) => row.id))
-        return { messages: rows.map((row) => ({ ...row, read: true })) }
+        return { messages: rows.map((row) => publicMessage({ ...row, read: true })) }
       }
-      return { messages: rows }
+      return { messages: rows.map(publicMessage) }
     },
   }
 

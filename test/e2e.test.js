@@ -17,7 +17,9 @@ import { randomBytes } from 'node:crypto'
 import { apply } from '../index.js'
 
 const SECRET = randomBytes(16).toString('hex')
-const TURN_MS = 60_000
+// Must exceed the connection budget below, or a slow DHT kills the test at the same instant the
+// wait would have succeeded (`timeout waiting for both connected after 20000ms` in run-44 was this).
+const TURN_MS = 180_000
 
 /** One fleet: the plugin on a fake Host context, with everything a test needs to inspect. */
 function fleet(tag) {

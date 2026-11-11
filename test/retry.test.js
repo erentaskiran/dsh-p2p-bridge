@@ -23,7 +23,9 @@ import { createIdentity, fingerprint as fingerprintOf, sign } from '../lib/ident
 import { seal, signingBytes } from '../lib/protocol.js'
 
 const SECRET = randomBytes(16).toString('hex')
-const TURN_MS = 60_000
+// Must exceed the connection budget below, or a slow DHT kills the test at the same instant the
+// wait would have succeeded (`timeout waiting for both connected after 20000ms` in run-44 was this).
+const TURN_MS = 180_000
 
 /** One fleet on a fake Host context; `swarm` decides whether it reaches the network. */
 function fleet(tag, { offline = false } = {}) {
